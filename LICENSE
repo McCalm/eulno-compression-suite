@@ -1,0 +1,68 @@
+================================================================================
+EULNO STUDIO — COMMUNITY LICENSE & TERMS OF USE
+Version: 2.0 | Date: Tuesday, November 24, 2026 | Dedicated to Euler & Noether
+================================================================================
+
+PLEASE READ THIS AGREEMENT CAREFULLY BEFORE USING THIS SOFTWARE.
+BY SCROLLING TO THE BOTTOM AND CLICKING "I AGREE & CONTINUE", YOU ACCEPT ALL
+TERMS AND CONDITIONS BELOW. IF YOU DO NOT AGREE, DO NOT USE THIS SOFTWARE.
+
+1. GRATUITOUS COMMUNITY, ACADEMIC & PUBLIC-SECTOR LICENSE (< USD $10,000,000)
+The copyright holders grant you a worldwide, non-exclusive, gratuitous (free of
+charge) copyright license to use, copy, modify, and distribute this Software
+("EULNO", including source code, executables, .enom models, and documentation)
+in source or binary form, PROVIDED THAT:
+(a) You are an individual, educational/research institution, non-profit
+    organization, public authority, OR a commercial entity whose annual gross
+    revenue (including affiliates) is strictly below USD $10,000,000; AND
+(b) You include this complete License and Attribution Notice with all copies; AND
+(c) Modified files carry clear notices stating that you changed them.
+
+2. COMMERCIAL LICENSE FOR LARGE ENTERPRISES (>= USD $10,000,000)
+Commercial entities (including affiliates) with an annual gross revenue of
+USD $10,000,000 or more must obtain a separate written commercial license
+agreement from the copyright holders prior to any internal enterprise deployment,
+integration, or commercial exploitation of this Software.
+
+3. FULL EXCLUSION OF WARRANTY & LIABILITY ("AS IS" / GRATUITOUS PROVISION)
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT ANY WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED. BECAUSE THIS SOFTWARE IS PROVIDED FREE OF CHARGE UNDER
+SECTION 1, ALL LIABILITY OF THE AUTHORS AND COPYRIGHT HOLDERS IS COMPLETELY
+EXCLUDED TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW (INCLUDING §§ 521, 523
+BGB). YOU USE THIS SOFTWARE ENTIRELY AT YOUR OWN RISK AND BEAR FULL
+RESPONSIBILITY.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY DIRECT,
+INDIRECT, INCIDENTAL, CONSEQUENTIAL, OR SPECIAL DAMAGES, LOSS OF DATA, FILE
+CORRUPTION, LOSS OF PROFITS, BUSINESS INTERRUPTION, OR HARDWARE DAMAGE. NO
+COMPENSATION, PARTIAL PAYMENTS, OR REFUNDS SHALL BE OWED UNDER ANY CIRCUMSTANCE.
+NOTHING IN THIS AGREEMENT EXCLUDES LIABILITY WHERE SUCH EXCLUSION IS PROHIBITED
+BY MANDATORY STATUTORY LAW (SUCH AS INTENT, GROSS NEGLIGENCE, OR INJURY TO LIFE,
+BODY, OR HEALTH).
+
+4. USER OBLIGATIONS: MANDATORY BACKUPS & ZERO-KNOWLEDGE ENCRYPTION
+(a) You are solely responsible for maintaining independent, verified backups of
+    all data before using this Software.
+(b) When using Argon2id and ChaCha20-Poly1305 encryption (ELNS), there is no
+    master password or recovery key; lost passwords cannot be recovered.
+
+5. HIGH-RISK ACTIVITIES & EXPORT COMPLIANCE
+This Software is not intended for life-support, medical, nuclear, aviation,
+or defense systems. You are responsible for complying with applicable export
+and cryptography laws.
+
+6. GOVERNING LAW, EXCLUSIVE GERMAN JURISDICTION & SEVERABILITY
+This Agreement and all disputes, contractual agreements, or other legal matters
+arising out of or in connection with this Software shall be governed exclusively
+by the laws of the Federal Republic of Germany (excluding conflict-of-law rules
+and the UN CISG). To the maximum extent permitted by applicable law (including
+§ 38 ZPO), the courts of the Federal Republic of Germany shall have exclusive
+jurisdiction.
+If any provision of this Agreement is held invalid or unenforceable, the
+remaining provisions shall remain in full force and effect.
+
+================================================================================
+Copyright (c) 2026 Robin Heilos (McCalm) — https://huggingface.co/McCalm
+Technical Support (Community): https://huggingface.co/mccalm (Discussions Tab only)
+Commercial Enterprise Licensing (>= USD $10,000,000): mccalm@outlook.de
+END OF AGREEMENT — SCROLL COMPLETE
+================================================================================
