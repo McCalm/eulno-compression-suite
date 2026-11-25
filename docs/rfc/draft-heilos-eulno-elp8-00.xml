@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rfc SYSTEM "rfc2629.dtd">
+<rfc ipr="trust200902" docName="draft-heilos-eulno-elp8-00" category="info" submissionType="independent" version="3">
+  <front>
+    <title abbrev="ELP8 Container Format">
+      The ELP8 Container Format for Geometric Wheel-8 Compression, Hash-Anchored Self-Alignment, and Multi-Gear Streaming
+    </title>
+    <author fullname="Robin Heilos" initials="R." surname="Heilos">
+      <organization>EULNO Project</organization>
+      <address>
+        <postal>
+          <country>Germany</country>
+        </postal>
+        <email>mccalm@outlook.de</email>
+        <uri>https://eulno.org</uri>
+      </address>
+    </author>
+    <date year="2026" month="November" day="25"/>
+    <area>Applications and Real-Time</area>
+    <keyword>compression</keyword>
+    <keyword>container</keyword>
+    <keyword>elp8</keyword>
+    <keyword>eulno</keyword>
+    <keyword>hash-anchor</keyword>
+    <abstract>
+      <t>
+        This document specifies the binary container format .elp8 (EULNO Layered Protocol 8)
+        for streaming data compression based on counter-rotating modulo-8 wheel geometry,
+        inward-mirror stream bisection, and hash-anchored phase alignment. Unlike conventional
+        archive formats that treat checksums solely as passive post-decompression checks,
+        .elp8 embeds an active Anchor Hash (SHA-256 or SHA-512) inside a variable-tier header
+        (56, 88, or 152 bytes) to deterministically seed wheel sector alignment and enforce
+        constant-time cryptographic self-validation across arbitrary stream sizes up to
+        2^64 - 1 bytes.
+      </t>
+    </abstract>
+  </front>
+
+  <middle>
+    <section anchor="intro" numbered="true">
+      <name>Introduction</name>
+      <t>
+        Conventional compression containers append a checksum merely to detect bit errors
+        after decoding completes. The ELP8 (EULNO Layered Protocol 8) format couples the
+        cryptographic digest of the uncompressed stream directly to its geometric phase
+        alignment. By deriving the starting spoke S_0 on an M-spoke modular wheel from the
+        Anchor Hash, encoders and decoders share a deterministic geometric reference point
+        without transmitting external phase tables.
+      </t>
+    </section>
+
+    <section anchor="conventions" numbered="true">
+      <name>Conventions and Terminology</name>
+      <t>
+        The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD",
+        "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this
+        document are to be interpreted as described in BCP 14 (RFC 2119 and RFC 8174)
+        when, and only when, they appear in all capitals, as shown here.
+      </t>
+      <t>
+        All multi-byte integer fields in the ELP8 header and chunk frames are encoded in
+        network byte order (big-endian).
+      </t>
+    </section>
+
+    <section anchor="header-format" numbered="true">
+      <name>ELP8 Binary Container Layout</name>
+      <t>
+        Every compliant .elp8 stream MUST begin with a 24-byte Base Header followed by
+        the Anchor Hash (32 or 64 bytes) and an optional 64-byte Origin Authentication Tag,
+        resulting in a total header length of 56, 88, or 152 bytes.
+      </t>
+      <artwork type="ascii-art"><![CDATA[
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+|                    Magic Bytes ("ELP8")                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+|    Version    |     Flags     | Wheel Modulus |   Hash Algo   |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+|                   Original Size (uint64)                      |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+|                   Payload Length (uint64)                     |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+|            Anchor Hash (256 bits or 512 bits) ...             |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+|        Optional Origin Authentication Tag (512 bits) ...      |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+|                   Compressed Payload ...                      |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      ]]></artwork>
+
+      <section anchor="header-fields" numbered="true">
+        <name>Header Field Definitions</name>
+        <dl>
+          <dt>Magic Bytes (4 bytes, offset 0x00):</dt>
+          <dd>MUST be the exact ASCII sequence "ELP8" (0x45 0x4C 0x50 0x38).</dd>
+          <dt>Version (1 byte, offset 0x04):</dt>
+          <dd>MUST be set to 0x01 for this specification.</dd>
+          <dt>Flags (1 byte, offset 0x05):</dt>
+          <dd>
+            Bit 0 (0x01): Counter-Rotating Wheel Mode (1 = active).
+            Bit 1 (0x02): Inward-Mirror-Split (1 = left half [0..mid-1] advances clockwise;
+            right half [mid..n-1] advances counter-clockwise inward from n-1 to mid).
+            Bit 2 (0x04): Multi-Chunk Gear Mode (1 = framed chunk stream using Gears G0..G6).
+            Bit 3 (0x08): Authenticated Origin (1 = 64-byte HMAC-SHA512 / Ed25519 tag present
+            immediately following Anchor Hash).
+            Bits 4-7: Reserved; encoders MUST set to 0 and decoders MUST ignore.
+          </dd>
+          <dt>Wheel Modulus M (1 byte, offset 0x06):</dt>
+          <dd>Modular spoke count (1..255). Default MUST be 0x08. Value 0x00 MUST be rejected.</dd>
+          <dt>Hash Algorithm ID (1 byte, offset 0x07):</dt>
+          <dd>0x01 = SHA-256 (32-byte Anchor Hash); 0x02 = SHA-512 (64-byte Anchor Hash).</dd>
+          <dt>Original Size (8 bytes, offset 0x08):</dt>
+          <dd>Unsigned 64-bit integer specifying exact uncompressed byte length.</dd>
+          <dt>Payload Length (8 bytes, offset 0x10):</dt>
+          <dd>Unsigned 64-bit integer specifying exact byte length of the Compressed Payload.</dd>
+        </dl>
+      </section>
+    </section>
+    <section anchor="alignment" numbered="true">
+      <name>Hash-Anchored Alignment and Multi-Chunk Gear Framing</name>
+      <t>
+        Prior to geometric encoding, the encoder computes the Anchor Hash H_0 over the
+        uncompressed input stream and derives the root wheel sector:
+        S_0 = uint64(H_0[0..7]) mod M.
+      </t>
+      <t>
+        When Flag Bit 2 (0x04) is set, the Compressed Payload begins with a 32-bit unsigned
+        integer num_chunks, followed by num_chunks sequential frames. Each frame starts with
+        a 9-byte header: [Gear ID (1 byte)][Chunk Original Size (uint32)][Chunk Compressed Size (uint32)].
+        For chunk index i (0-based), the local phase anchor is S_i = (S_0 + i) mod M:
+      </t>
+      <ul>
+        <li><strong>Gear 0x00 (G0 - Raw Store):</strong> Uncompressed chunk bytes (prevents expansion on high-entropy data).</li>
+        <li><strong>Gear 0x01 (G1 - Deflate):</strong> RFC 1951 compressed chunk bytes.</li>
+        <li><strong>Gear 0x06 (G6 - Wheel-8 Inward-Mirror Spiral):</strong> Modular phase-XOR and delta residual stream anchored at S_i, followed by RFC 1951 compression.</li>
+      </ul>
+      <t>
+        During decoding, the decoder MUST reconstruct all chunks, verify that total decoded
+        bytes equal Original Size, recompute H_1 over the reconstructed stream, and verify
+        H_1 == H_0 in constant time before releasing output bytes.
+      </t>
+    </section>
+
+    <section anchor="security" numbered="true">
+      <name>Full-Lifecycle Security Considerations</name>
+      <ol>
+        <li>
+          <strong>Bounded Decompression (Decompression Bomb Defense):</strong> Each chunk MUST
+          NOT exceed 64 MiB (67,108,864 bytes). Decoders MUST enforce bounded streaming
+          decompression and abort immediately if decompressed output exceeds Chunk Original Size.
+        </li>
+        <li>
+          <strong>Source-Side TOCTOU and Symlink Defense:</strong> Encoders SHOULD open input
+          files with symlink traversal disabled (e.g., O_NOFOLLOW) and MUST verify via a
+          second-pass digest that the source stream was not altered during encoding.
+        </li>
+        <li>
+          <strong>Atomic Quarantine and Overwrite Protection:</strong> Decoders MUST write
+          reconstructed data to an isolated temporary quarantine file and promote it via atomic
+          rename only after Anchor Hash (and optional Bit 3 origin tag) verification succeeds.
+          Implementations MUST NOT overwrite existing target files unless explicitly authorized
+          by the operator, and MUST reject identical source and destination paths.
+        </li>
+      </ol>
+    </section>
+
+    <section anchor="iana" numbered="true">
+      <name>IANA Considerations</name>
+      <t>
+        This document requests registration of the media type application/elp8 in the IANA
+        "Media Types" registry:
+      </t>
+      <ul>
+        <li>Type name: application</li>
+        <li>Subtype name: elp8</li>
+        <li>Required parameters: N/A</li>
+        <li>Optional parameters: N/A</li>
+        <li>Encoding considerations: binary</li>
+        <li>Security considerations: See Section 5 of this document.</li>
+        <li>Interoperability considerations: Big-endian network byte order for all header fields.</li>
+        <li>Published specification: This document.</li>
+        <li>Applications that use this media type: EULNO compression tools and archival utilities.</li>
+        <li>Magic number(s): 0x45 0x4C 0x50 38 ("ELP8") at byte offset 0.</li>
+        <li>File extension(s): .elp8</li>
+        <li>Person &amp; email address to contact for further information: Robin Heilos &lt;mccalm@outlook.de&gt;</li>
+        <li>Intended usage: COMMON</li>
+        <li>Change controller: Robin Heilos</li>
+      </ul>
+    </section>
+  </middle>
+
+  <back>
+    <references>
+      <name>Normative References</name>
+      <reference anchor="RFC1951" target="https://rfc-editor.org">
+        <front>
+          <title>DEFLATE Compressed Data Format Specification version 1.3</title>
+          <author initials="P." surname="Deutsch"/>
+          <date year="1996" month="May"/>
+        </front>
+        <seriesInfo name="RFC" value="1951"/>
+      </reference>
+      <reference anchor="RFC2119" target="https://rfc-editor.org">
+        <front>
+          <title>Key words for use in RFCs to Indicate Requirement Levels</title>
+          <author initials="S." surname="Bradner"/>
+          <date year="1997" month="March"/>
+        </front>
+        <seriesInfo name="BCP" value="14"/>
+        <seriesInfo name="RFC" value="2119"/>
+      </reference>
+      <reference anchor="RFC8174" target="https://rfc-editor.org">
+        <front>
+          <title>Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words</title>
+          <author initials="B." surname="Leiba"/>
+          <date year="2017" month="May"/>
+        </front>
+        <seriesInfo name="BCP" value="14"/>
+        <seriesInfo name="RFC" value="8174"/>
+      </reference>
+    </references>
+  </back>
+</rfc>
