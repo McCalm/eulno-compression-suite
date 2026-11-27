@@ -14,37 +14,42 @@ tags:
   - pure-python
 ---
 
-# EULNO (`.elp8`) — 3D-Tetrahedron, Wheel-8 & Combinatorial Compression Suite (`v0.9.6-beta`)
+# EULNO (`.elp8`) — 3D-Tetrahedron, Wheel-8 & Combinatorial Compression Suite (`v0.9.7-beta`)
 
-**Quick Links:** [🌐 Project Website (eulno.org)](https://eulno.org) · [📖 User Guide & Functional Reference (DE)](docs/manual/EULNO_Funktionsreferenz_DE.md) · [📄 IETF RFC Draft (`draft-heilos-eulno-elp8-00`)](docs/rfc/draft-heilos-eulno-elp8-00.xml) · [🏛️ Zenodo DOI (`10.5281/zenodo.24521151`)](https://doi.org/10.5281/zenodo.24521151)
+**Quick Links:** [🌐 Project Website (eulno.org)](https://eulno.org) · [📖 User Guide & Functional Reference (DE)](docs/manual/EULNO_Funktionsreferenz_DE.md) · [📄 IETF RFC Draft (`draft-heilos-eulno-elp8-00`)](docs/rfc/draft-heilos-eulno-elp8-00.xml) · [🏛️ Zenodo DOI (`10.5281/zenodo.24521151`)](https://doi.org)
 
-**Public Beta Notice (`v0.9.6-beta`):** This release implements the RFC-compliant `.elp8` streaming container specification (`draft-heilos-eulno-elp8-00`), full-lifecycle TOCTOU/symlink/quarantine hardening, and 7-gear MDL routing (`G0..G6`). Always maintain independent, verified backups of important files before testing new archive formats.
+**Public Beta Notice (`v0.9.7-beta`):** This release implements the RFC-compliant `.elp8` streaming container specification (`draft-heilos-eulno-elp8-00`), full-lifecycle TOCTOU/symlink/quarantine hardening, a 100% self-contained native `rANS-256` entropy backend (`zlib`-free by default), and 8-gear MDL routing (`G0..G7`). Always maintain independent, verified backups of important files before testing new archive formats.
 
-**EULNO** is a pure-Python, integer-based lossless compression engine and `O(1)`-RAM streaming CLI archiving suite built around **discrete 3D-tetrahedron geometry**, **counter-rotating modulo-8 wheel geometry with hash-anchored phase alignment (`S₀`)**, **unified multi-stride difference operators (`Δₛ,ₖ`)**, **bit-plane slicing with CTZ-accelerated Pascal `C(64, k)` combinatorial coding**, and **Move-To-Front (MTF)** transforms.
+**EULNO** is a pure-Python, **100% self-contained** integer-based lossless compression engine and `O(1)`-RAM streaming CLI archiving suite. In its default operating mode, EULNO runs completely without external compression libraries (`zlib`-free), pairing **discrete 3D-tetrahedron geometry**, **counter-rotating modulo-8 wheel geometry (`S₀`)**, **multi-stride difference operators (`Δₛ,ₖ`)**, **CTZ-accelerated Pascal `C(64, k)` coding**, and **32-KiB Burrows-Wheeler + Move-To-Front (`BWT+MTF`)** transforms with its own native, purely integer **256-symbol rANS (`M = 4096`) entropy coder**.
 
 Every `.elp8` container enforces **bit-exact data integrity** via an RFC-compliant tiered master header (**56 bytes** with SHA-256, **88 bytes** with SHA-512, or **152 bytes** with Bit-3 Origin Authentication Tag) where the cryptographic Anchor Hash simultaneously seeds deterministic wheel alignment (`S₀ = uint64(H₀[0..7]) mod 8`) and validates reconstruction in constant time.
 
 ---
 
-## Key Features (`v0.9.6-beta`)
+## Key Features (`v0.9.7-beta`)
 
+* **100% Self-Contained Native Entropy Backend (`zlib`-Free Default):**
+  * By default (`-m max` and `-m turbo`), EULNO relies on **zero third-party compression libraries** (`zlib`-free), driving all transform gears (`G1..G7`) through its own deterministic, purely integer **256-symbol rANS & 2-state context-rANS coder (`M = 4096`)**.
+  * External `zlib` compression (`G10..G13`, RFC Flag Bit 5 `0x20`) is strictly decoupled as an opt-in speed/legacy backend via `--use-zlib` and is rejected by default during verification and extraction unless explicitly enabled.
 * **RFC-Compliant Streaming Container (`draft-heilos-eulno-elp8-00`):**
   * **Authenticated Vault Encryption (`-p / --password`, Flag Bit 4):** Optional post-quantum-safe payload encryption using **Argon2id** key derivation and **`O(1)`-RAM `XChaCha20-Poly1305` secretstream** (`Compress-then-Encrypt`) with AEAD header binding.
   * Supports arbitrarily large files (multi-GB / TB up to `2^64 - 1` bytes) with **constant `O(1)` RAM usage**.
   * Configurable **Anchor Hash** (`--hash sha512` default or `--hash sha256`) and optional **64-byte Origin Authentication Tag** (`--key-file`, Flag Bit 3).
   * Full-lifecycle security hardening: `O_NOFOLLOW` descriptor locking, two-pass TOCTOU modification guard, bounded decompression (`64 MiB` chunk ceiling), path-traversal & symlink-escape protection, overwrite protection (requires `-f`), and atomic quarantine promotion (`os.replace`).
 * **Dual Operating Profiles (`TURBO` vs. `MAX`):**
-  * `TURBO` (`-m turbo`): Restricts routing to Gear 0 (Noise Bypass), Gear 1 (`Δₛ,ₖ` ZigZag), and Gear 6 (Wheel-8 Mirror-Spiral) for ultra-fast throughput.
-  * `MAX` (`-m max`, default): Activates the full **Minimum Description Length (MDL) Auto-Router** across Gears `0..6`, automatically selecting the smallest verified representation per chunk.
-* **7 Specialized Integer Transform Gears (`G0..G6`, Zero Floating-Point Drift):**
+  * `TURBO` (`-m turbo`): Restricts routing to Gear 0 (Noise Bypass), Gear 1 (`Δₛ,ₖ` ZigZag + rANS-256), and Gear 6 (Wheel-8 Mirror-Spiral + rANS-256) for ultra-fast throughput.
+  * `MAX` (`-m max`, default): Activates the full **Minimum Description Length (MDL) Auto-Router** across all 8 Gears (`G0..G7`), automatically selecting the smallest verified representation per chunk.
+* **8 Specialized Integer Transform Gears (`G0..G7`, Zero Floating-Point Drift):**
   * **Gear 0 (`G0_RAW`):** Dual-entropy pre-filter (`H(X)` and `H(ΔX)`) detects incompressible random noise in `< 0.25 ms` with zero payload expansion.
-  * **Gear 1 (`G1_TURBO_ZIGZAG`):** Unified spatial/curve difference equation `(Xᵢ − k·Xᵢ₋ₛ + (k−1)·Xᵢ₋₂ₛ) mod 256` with vectorized ZigZag sign folding.
-  * **Gear 2 (`G2_NIBBLE_16x64`):** 4-bit nibble decomposition and 64-column matrix transposition.
+  * **Gear 1 (`G1_TURBO_RANS`):** Unified spatial/curve difference equation `(Xᵢ − k·Xᵢ₋ₛ + (k−1)·Xᵢ₋₂ₛ) mod 256` with vectorized ZigZag sign folding and native rANS-256 coding.
+  * **Gear 2 (`G2_NIBBLE_RANS`):** 4-bit nibble decomposition and 64-column matrix transposition with native rANS-256 coding.
   * **Gear 3 (`G3_TETRA3D_SPARSE`):** Causal 3D-tetrahedron gradient predictor with hierarchical macro-zero runs (`32`, `512`, `4096`, `32768`) and 20-symbol sparse rANS coding.
-  * **Gear 4 (`G4_BITPLANE_PASCAL`):** 8-layer bit-plane slicing + bitwise XOR edge detection + CTZ-accelerated (`w & -w`) Pascal `C(64, k)` enumerative coding.
+  * **Gear 4 (`G4_BITPLANE_RANS`):** 8-layer bit-plane slicing + bitwise XOR edge detection + CTZ-accelerated (`w & -w`) Pascal `C(64, k)` enumerative coding.
   * **Gear 5 (`G5_MTF_TETRA3D`):** Move-To-Front recency ranking coupled with 3D-tetrahedron gradient coding.
-  * **Gear 6 (`G6_WHEEL8_SPIRAL`):** Counter-rotating modulo-8 wheel phase transform with **Inward-Mirror-Split** (left half clockwise `0 -> mid-1`, right half counter-clockwise inward `n-1 -> mid`) anchored at sector `S₀`.
-* **Built-in End-to-End Self-Test (`--self-test`):** 6-step verification suite covering `G0..G6`, SHA-512 & SHA-256, Bit-3 origin authentication, directory tree bundling and Argon2id + XChaCha20-Poly1305 encryption.
+  * **Gear 6 (`G6_WHEEL8_RANS`):** Counter-rotating modulo-8 wheel phase transform with **Inward-Mirror-Split** (left half clockwise `0 -> mid-1`, right half counter-clockwise inward `n-1 -> mid`) anchored at sector `S₀`.
+  * **Gear 7 (`G7_BWT_CONTEXT`):** Static `O(1)`-arena 32-KiB Prefix-Doubling Burrows-Wheeler Transform (`BWT`) + Move-To-Front (`MTF`) coupled with EULNO's native 2-state context-rANS coder (`Mₜ₋₁ == 0` vs. `Mₜ₋₁ > 0`).
+* **Built-in End-to-End Self-Test (`--self-test`):** 5-stage verification suite covering pure-EULNO `G0..G7`, SHA-512 & SHA-256, Bit-3 origin authentication, the `--use-zlib` rejection guard, directory tree bundling, and Argon2id + XChaCha20-Poly1305 encryption.
+
 
 ---
 
@@ -61,19 +66,20 @@ python eulno_pack.py --self-test
 # Compress and encrypt an archive with Argon2id + XChaCha20-Poly1305
 python eulno_pack.py -c secret_data.bin -p
 
-# Compress a single file with maximum compression (MDL Auto-Router G0..G6, SHA-512)
+# Compress a single file with 100% self-contained EULNO MAX (G0..G7, native rANS-256, SHA-512)
 python eulno_pack.py -c heartbeat.wav
 
 # Compress with SHA-256 compact 56-byte header and Bit-3 Origin Authentication Tag
 python eulno_pack.py -c data.bin --hash sha256 --key-file secret.key
 
-# Compress using Ultra-Fast Mode (TURBO: Gears G0, G1, G6)
+# Compress using Ultra-Fast Mode (TURBO: Gears G0, G1, G6) or optional --use-zlib speed backend
 python eulno_pack.py -c sensor_stream.dat -m turbo
+python eulno_pack.py -c large_backup.bin -m turbo --use-zlib
 
 # Compress an entire directory tree including subdirectories (O(1) RAM)
 python eulno_pack.py -c ./my_project_folder -o project_backup.elp8
 
-# Extract an .elp8 archive bit-exact (constant-time Anchor Hash verification)
+# Extract an .elp8 archive bit-exact (live chunk progress + constant-time Anchor Hash verification)
 python eulno_pack.py -x archive.elp8
 
 # Verify full stream integrity (-t) or inspect RFC header & Start Spoke S0 (-i)
@@ -83,10 +89,13 @@ python eulno_pack.py -i archive.elp8
 
 ---
 
-## Benchmark & Real-World Streaming Evaluation (`v0.9.6-beta`)
+## Benchmark & Real-World Streaming Evaluation (`v0.9.7-beta`)
 
+* **100 MB General Corpus Benchmark (`enwik8` — 100,000,000 B, Pure Native rANS-256, Zero `zlib`):**
+  * **Compression (`-m max --hash sha512`):** `100,000,000 B` → `38,904,580 B` (**38.90% | +61.10% lossless space saved**, `88 B` RFC header, `S0 = 1`, Gears: `96x G7_BWT_CONTEXT`).
+  * **Extraction & Verification (`-x` / `-t`):** `100,000,000 B` restored & verified in **`51.694 s`** — `SHA512 PASS (100% Bit-Exact)`.
 * **Real-World Uncompressed PCM Audio (`heartbeat.wav` — 67,752,136 B):**
-  * **Compression (`-m max --hash sha512`):** `67,752,136 B` → `60,829,784 B` (**+10.22 % lossless space saved**, `88 B` RFC header, `S0 = 3`, Gears: `51x G2_NIBBLE_16x64`, `14x G1_TURBO_ZIGZAG`).
+  * **Compression (`-m max --hash sha512`):** `67,752,136 B` → `60,829,784 B` (**+10.22% lossless space saved**, `88 B` RFC header, `S0 = 3`, Gears: `51x G2`, `14x G1`).
   * **Extraction & Verification (`-x`):** `67,752,136 B` restored in **`842.3 ms` (`76.71 MB/s`)** — `SHA512 PASS (100% Bit-Exact)`.
 
 | Data Domain (50,000 B) | EULNO `TURBO` | EULNO `MAX` (MDL Router) | `zlib` (L9, no SHA) | `LZMA` (7-Zip, no SHA) | EULNO Domain Verdict |
@@ -102,8 +111,8 @@ python eulno_pack.py -i archive.elp8
 
 ## Repository Structure
 
-* `eulno_beta_engine.py` — RFC-compliant `ELP8` streaming engine, MDL router, and Gears `G0..G6` (including Wheel-8 Inward-Mirror Spiral).
-* `eulno_pack.py` — Hardened CLI packer/extractor, `O(1)`-RAM directory bundler, and `--self-test` runner.
+* `eulno_beta_engine.py` — RFC-compliant `ELP8` streaming engine, native rANS-256 coder (`M = 4096`), MDL router, and Gears `G0..G7` (plus opt-in `G10..G13`).
+* `eulno_pack.py` — Hardened CLI packer/extractor, `O(1)`-RAM directory bundler, and 5-stage `--self-test` runner.
 * `eulno_tetra3d_v21.py` — Discrete 3D-tetrahedron gradient predictor and 20-symbol sparse rANS backend (`G3` & `G5`).
 * `docs/rfc/draft-heilos-eulno-elp8-00.xml` — Official IETF Internet-Draft specification (RFCXML v3) for the `.elp8` container format.
 * `docs/manual/` — German Functional Reference & User Guide (`EULNO_Funktionsreferenz_DE.md` & `.pdf` + visual diagrams).

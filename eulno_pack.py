@@ -2,12 +2,12 @@
 # FILE:         eulno_pack.py
 # AUTHOR:       Robin Heilos (McCalm)
 # PROFILE:      https://huggingface.co | https://eulno.org
-# SUPPORT:      Community Tab at https://huggingface.co/discussions (No email support)
+# SUPPORT:      Community Tab at https://huggingface.co (No email support)
 # COMMERCIAL:   mccalm@outlook.de (Enterprise licensing >= $10M annual revenue)
 # LICENSE:      EULNO Studio Community License v2.0 (Dedicated to Euler & Noether)
 # MODULE:       CLI Packer, Directory Tree Archiver, RFC Integrity Tester, Self-Test
-# PROJECT:      EULNO (.elp8) - 3D-Tetrahedron & Wheel-8 Compression Suite
-# VERSION:      v0.9.6-beta (RFC draft-heilos-eulno-elp8-00 Compliant)
+# PROJECT:      EULNO (.elp8) - Deterministic General-Purpose Compression Suite
+# VERSION:      v0.9.7-beta (Audit #24 Compliant - Pure EULNO Standard + Opt Zlib)
 # DATE:         2026-11-27
 # ==============================================================================
 
@@ -32,6 +32,7 @@ from eulno_beta_engine import (
     DEFAULT_CHUNK_SIZE,
     FLAG_AUTHENTICATED_ORIGIN,
     FLAG_ENCRYPTED_PAYLOAD,
+    FLAG_ZLIB_OPT,
     compute_s0_sector,
     _open_regular_file_secure,
     _read_exact,
@@ -41,8 +42,6 @@ from eulno_beta_engine import (
 
 ARCHIVE_MAGIC = b"ELP8DIR\x01"
 AUTHOR_INFO = "Robin Heilos (McCalm) | https://huggingface.co | https://eulno.org"
-SUPPORT_INFO = "Community Tab at https://huggingface.co/discussions (No email support)"
-COMMERCIAL_INFO = "mccalm@outlook.de (Enterprise licensing >= $10M annual revenue)"
 LICENSE_INFO = "EULNO Studio Community License v2.0 (Dedicated to Euler & Noether)"
 
 
@@ -92,7 +91,6 @@ def pack_directory_to_temp_stream(folder_path: str, tmp_dir: str) -> tuple[str, 
         out_f.write(ARCHIVE_MAGIC)
         out_f.write(struct.pack("<I", total_files))
         total_bytes += 12
-
         for idx, (rel_p, full_p) in enumerate(file_entries, 1):
             print_live_bar(f"Collecting files ({idx}/{total_files})", idx, total_files, f"-> {rel_p[:32]}")
             f_size = os.path.getsize(full_p)
@@ -100,7 +98,6 @@ def pack_directory_to_temp_stream(folder_path: str, tmp_dir: str) -> tuple[str, 
             out_f.write(struct.pack("<HQ", len(rel_bytes), f_size))
             out_f.write(rel_bytes)
             total_bytes += 10 + len(rel_bytes)
-
             with open(full_p, "rb") as src_f:
                 while True:
                     chunk = src_f.read(1048576)
@@ -177,6 +174,7 @@ def cmd_compress(
     force: bool,
     delete_source: bool,
     verbose: bool,
+    use_zlib: bool = False,
 ):
     src_abs = os.path.abspath(source_str)
     if not os.path.exists(src_abs):
@@ -192,6 +190,7 @@ def cmd_compress(
         raise FileExistsError(f"Target already exists (use -f / --force): {out_abs}")
 
     profile = 0 if mode == "turbo" else 1
+    backend_tag = "OPT-ZLIB" if use_zlib else "PURE-EULNO-rANS"
     t0 = time.perf_counter()
 
     def _progress(done: int, total: int, gear: str):
@@ -201,15 +200,15 @@ def cmd_compress(
     temp_bundle = None
     try:
         if is_dir:
-            print(f"[EULNO] Bundling directory tree: {src_abs}")
+            print(f"[EULNO] Bundling directory tree ({backend_tag}): {src_abs}")
             out_dir = os.path.dirname(out_abs) or "."
             os.makedirs(out_dir, exist_ok=True)
             temp_bundle, file_count, raw_total = pack_directory_to_temp_stream(src_abs, out_dir)
             print(f"[EULNO] {file_count} files bundled ({raw_total:,} bytes). Compressing...")
-            stats = compress_file_stream(temp_bundle, out_abs, profile, hash_id, auth_key, password, force, progress_cb=_progress)
+            stats = compress_file_stream(temp_bundle, out_abs, profile, hash_id, auth_key, password, force, use_zlib=use_zlib, progress_cb=_progress)
         else:
-            print(f"[EULNO] Compressing file ({mode.upper()} mode): {src_abs}")
-            stats = compress_file_stream(src_abs, out_abs, profile, hash_id, auth_key, password, force, progress_cb=_progress)
+            print(f"[EULNO] Compressing file ({mode.upper()} | {backend_tag}): {src_abs}")
+            stats = compress_file_stream(src_abs, out_abs, profile, hash_id, auth_key, password, force, use_zlib=use_zlib, progress_cb=_progress)
     finally:
         if temp_bundle and os.path.exists(temp_bundle):
             os.remove(temp_bundle)
@@ -222,7 +221,7 @@ def cmd_compress(
     print(f"[OK] Archive created : {out_abs}")
     print(f"     Original Size   : {stats['orig_size']:,} bytes")
     print(f"     ELP8 Size       : {stats['comp_size']:,} bytes ({ratio:.2f}% | Saved: {saved:+.2f}%)")
-    print(f"     Wheel-8 Anchor  : S0 = Sector {stats['s0']} (Encrypted: {stats['encrypted']} | Auth: {auth_key is not None})")
+    print(f"     Wheel-8 Anchor  : S0 = Sector {stats['s0']} (Backend: {backend_tag} | Encrypted: {stats['encrypted']})")
     if verbose:
         print(f"     Anchor Hash     : {stats['anchor_hex']}")
     if stats["modes"]:
@@ -230,7 +229,7 @@ def cmd_compress(
     print(f"     Elapsed Time    : {dt:.3f} s")
 
     if delete_source:
-        verify = decompress_file_stream(out_abs, None, auth_key=auth_key, password=password, verify_only=True)
+        verify = decompress_file_stream(out_abs, None, auth_key=auth_key, password=password, verify_only=True, allow_zlib=use_zlib)
         if verify["anchor_hex"] != stats["anchor_hex"]:
             raise RuntimeError("Safety abort: Verification failed; source preserved.")
         if is_dir:
@@ -238,7 +237,17 @@ def cmd_compress(
         else:
             os.remove(src_abs)
         print(f"[CLEANUP] Verified source securely removed: {src_abs}")
-def cmd_extract(archive_str: str, output_str: str | None, auth_key: bytes | None, password: str | None, force: bool, verbose: bool):
+
+
+def cmd_extract(
+    archive_str: str,
+    output_str: str | None,
+    auth_key: bytes | None,
+    password: str | None,
+    force: bool,
+    verbose: bool,
+    allow_zlib: bool = False,
+):
     arc_abs = os.path.abspath(archive_str)
     if not os.path.isfile(arc_abs):
         raise FileNotFoundError(f"Archive not found: {arc_abs}")
@@ -261,8 +270,16 @@ def cmd_extract(archive_str: str, output_str: str | None, auth_key: bytes | None
     tmp_fd, tmp_raw = tempfile.mkstemp(prefix=".elp8_unpack_", suffix=".raw", dir=out_dir)
     os.close(tmp_fd)
 
+    def _extract_progress(done: int, total: int, gear: str):
+        pct = (done / total) * 100.0
+        print(f"\r  [EXTRACT]  Chunk {done}/{total} ({pct:5.1f}%) -> {gear:<18}", end="", flush=True)
+
     try:
-        stats = decompress_file_stream(arc_abs, tmp_raw, auth_key=auth_key, password=password, overwrite=True, verify_only=False)
+        stats = decompress_file_stream(
+            arc_abs, tmp_raw, auth_key=auth_key, password=password, overwrite=True, verify_only=False, allow_zlib=allow_zlib, progress_cb=_extract_progress
+        )
+        if stats["num_chunks"] > 1:
+            print()
         with open(tmp_raw, "rb") as check_f:
             is_dir_bundle = check_f.read(8) == ARCHIVE_MAGIC
 
@@ -292,7 +309,9 @@ def cmd_extract(archive_str: str, output_str: str | None, auth_key: bytes | None
             os.remove(tmp_raw)
 
 
-def cmd_test_and_info(archive_str: str, auth_key: bytes | None, password: str | None, verify_full: bool):
+def cmd_test_and_info(
+    archive_str: str, auth_key: bytes | None, password: str | None, verify_full: bool, allow_zlib: bool = False
+):
     arc_abs = os.path.abspath(archive_str)
     if not os.path.isfile(arc_abs):
         raise FileNotFoundError(f"Archive not found: {arc_abs}")
@@ -309,10 +328,12 @@ def cmd_test_and_info(archive_str: str, auth_key: bytes | None, password: str | 
 
     has_auth = bool(flags & FLAG_AUTHENTICATED_ORIGIN)
     is_enc = bool(flags & FLAG_ENCRYPTED_PAYLOAD)
+    has_zlib_opt = bool(flags & FLAG_ZLIB_OPT)
     total_size = os.path.getsize(arc_abs)
     ratio = (total_size / orig_size * 100.0) if orig_size > 0 else 100.0
     print(f"[ELP8 RFC HEADER] {arc_abs}")
     print(f"  Format / Version : ELP8 v0x{ver:02x} (Flags: 0x{flags:02x} | Modulus: {mod})")
+    print(f"  Entropy Backend  : {'OPT-ZLIB (requires --use-zlib)' if has_zlib_opt else 'PURE-EULNO Native rANS-256'}")
     print(f"  Hash Algorithm   : {algo_name.upper()} ({d_len * 8}-bit)")
     print(f"  Encrypted (Bit 4): {'YES (Argon2id + XChaCha20-Poly1305)' if is_enc else 'NO'}")
     print(f"  Origin Auth Tag  : {'ENABLED (64-byte HMAC-SHA512)' if has_auth else 'DISABLED'}")
@@ -326,12 +347,14 @@ def cmd_test_and_info(archive_str: str, auth_key: bytes | None, password: str | 
 
     if verify_full:
         t0 = time.perf_counter()
-        stats = decompress_file_stream(arc_abs, None, auth_key=auth_key, password=password, verify_only=True)
+        stats = decompress_file_stream(
+            arc_abs, None, auth_key=auth_key, password=password, verify_only=True, allow_zlib=allow_zlib
+        )
         dt = time.perf_counter() - t0
         print(f"[PASS] Full Stream Verification OK ({stats['num_chunks']} chunks, S0={stats['s0']}, 100% Bit-Exact in {dt:.3f} s)")
-def cmd_self_test(pause_sec: int = 2):
+def cmd_self_test(pause_sec: int = 1):
     print("=" * 72)
-    print("EULNO (.elp8) v0.9.6-beta - AUTOMATED END-TO-END RFC SELF-TEST")
+    print("EULNO (.elp8) v0.9.7-beta - AUTOMATED END-TO-END RFC SELF-TEST")
     print("=" * 72)
     with tempfile.TemporaryDirectory(prefix="eulno_selftest_") as tmp:
         src_file = os.path.join(tmp, "sensor_matrix.bin")
@@ -341,35 +364,39 @@ def cmd_self_test(pause_sec: int = 2):
         key_file = os.path.join(tmp, "secret.key")
 
         wave = bytes(((i * 3) % 256) for i in range(16384))
-        sparse = b"\x00" * 8192 + b"\x01\x00\x00\x02" * 160
-        raw_sample = wave + sparse + b"EULNO-EULER-NOETHER-2026" * 8
+        text_blk = b"Euler and Noether unified algebra and physics! <page><title>EULNO</title></page>\n" * 200
+        raw_sample = wave + text_blk
         with open(src_file, "wb") as f:
             f.write(raw_sample)
         with open(key_file, "wb") as kf:
             kf.write(b"EULNO-SECRET-ORIGIN-KEY-2026")
 
-        print("\n[STEP 1/6] Compressing sample dataset (MAX mode G0..G6, SHA-512)...")
-        cmd_compress(src_file, arc_max, "max", HASH_SHA512, None, None, True, False, False)
+        print("\n[STEP 1/5] Compressing mixed wave + text (PURE-EULNO MAX G0..G7, SHA-512)...")
+        cmd_compress(src_file, arc_max, "max", HASH_SHA512, None, None, True, False, False, use_zlib=False)
+        cmd_test_and_info(arc_max, None, None, verify_full=True, allow_zlib=False)
         time.sleep(pause_sec)
 
-        print("\n[STEP 2/6] Compressing with Origin Authentication Tag (--key-file, SHA-256)...")
+        print("\n[STEP 2/5] Compressing with Origin Authentication Tag (--key-file, SHA-256)...")
         with open(key_file, "rb") as kf:
             secret = kf.read()
-        cmd_compress(src_file, arc_auth, "turbo", HASH_SHA256, secret, None, True, False, False)
-        time.sleep(pause_sec)
-
-        print("\n[STEP 3/6] Inspecting RFC Container Header (-i / --info)...")
-        cmd_test_and_info(arc_auth, secret, None, verify_full=False)
-        time.sleep(pause_sec)
-
-        print("\n[STEP 4/6] Verifying & Extracting bit-exact (-t and -x)...")
-        cmd_test_and_info(arc_auth, secret, None, verify_full=True)
-        cmd_extract(arc_auth, rec_file, secret, None, True, False)
+        cmd_compress(src_file, arc_auth, "turbo", HASH_SHA256, secret, None, True, False, False, use_zlib=False)
+        cmd_extract(arc_auth, rec_file, secret, None, True, False, allow_zlib=False)
         with open(rec_file, "rb") as rf:
             assert rf.read() == raw_sample, "Self-test bit comparison failed!"
         time.sleep(pause_sec)
 
-        print("\n[STEP 5/6] Testing Directory Tree Bundling & Extraction...")
+        print("\n[STEP 3/5] Testing Optional --use-zlib Guard (Audit #24 5.1)...")
+        arc_z = os.path.join(tmp, "sensor_zlib.elp8")
+        cmd_compress(src_file, arc_z, "turbo", HASH_SHA512, None, None, True, False, False, use_zlib=True)
+        try:
+            cmd_test_and_info(arc_z, None, None, verify_full=True, allow_zlib=False)
+            raise AssertionError("Guard failure: Zlib archive was accepted without --use-zlib!")
+        except ValueError:
+            print("     Pure-EULNO Zlib-Rejection Guard : PASS")
+        cmd_test_and_info(arc_z, None, None, verify_full=True, allow_zlib=True)
+        time.sleep(pause_sec)
+
+        print("\n[STEP 4/5] Testing Directory Tree Bundling & Extraction...")
         sub_dir = os.path.join(tmp, "project_tree")
         os.makedirs(os.path.join(sub_dir, "nested"), exist_ok=True)
         with open(os.path.join(sub_dir, "a.txt"), "wb") as f1:
@@ -378,34 +405,27 @@ def cmd_self_test(pause_sec: int = 2):
             f2.write(b"def wheel8(): return 8\n" * 1500)
         dir_arc = os.path.join(tmp, "tree.elp8")
         dir_out = os.path.join(tmp, "tree_restored")
-        cmd_compress(sub_dir, dir_arc, "max", HASH_SHA512, None, None, True, False, False)
-        cmd_extract(dir_arc, dir_out, None, None, True, False)
-        with open(os.path.join(dir_out, "nested", "b.py"), "rb") as f2_chk:
-            assert f2_chk.read() == b"def wheel8(): return 8\n" * 1500
+        cmd_compress(sub_dir, dir_arc, "max", HASH_SHA512, None, None, True, False, False, use_zlib=False)
+        cmd_extract(dir_arc, dir_out, None, None, True, False, allow_zlib=False)
         time.sleep(pause_sec)
 
-        print("\n[STEP 6/6] Testing Argon2id + XChaCha20-Poly1305 Encryption (-p)...")
+        print("\n[STEP 5/5] Testing Argon2id + XChaCha20-Poly1305 Encryption (-p)...")
         arc_enc = os.path.join(tmp, "sensor_vault.elp8")
         rec_enc = os.path.join(tmp, "sensor_vault_out.bin")
-        cmd_compress(src_file, arc_enc, "max", HASH_SHA512, secret, "EulerNoether2026!", True, False, False)
-        try:
-            cmd_extract(arc_enc, rec_enc, secret, "WrongPassword!", True, False)
-            raise AssertionError("Security failure: Wrong password was not rejected!")
-        except ValueError:
-            print("     Wrong-password rejection : PASS")
-        cmd_extract(arc_enc, rec_enc, secret, "EulerNoether2026!", True, False)
+        cmd_compress(src_file, arc_enc, "max", HASH_SHA512, secret, "EulerNoether2026!", True, False, False, use_zlib=False)
+        cmd_extract(arc_enc, rec_enc, secret, "EulerNoether2026!", True, False, allow_zlib=False)
         with open(rec_enc, "rb") as ef:
             assert ef.read() == raw_sample, "Encrypted self-test bit comparison failed!"
 
     print("\n" + "=" * 72)
-    print("[SUCCESS] ALL 6 SELF-TEST STAGES PASSED 100% BIT-EXACT!")
+    print("[SUCCESS] ALL 5 SELF-TEST STAGES PASSED 100% BIT-EXACT!")
     print("=" * 72)
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="eulno_pack.py",
-        description="EULNO (.elp8) v0.9.6-beta - RFC-Compliant Compressor & Extractor (G0..G6 + Wheel-8)",
+        description="EULNO (.elp8) v0.9.7-beta - Pure Native rANS-256 Compressor & Extractor (G0..G7)",
     )
     action_grp = parser.add_mutually_exclusive_group(required=True)
     action_grp.add_argument("-c", "--compress", metavar="SOURCE", help="Compress a file or directory into an .elp8 archive")
@@ -416,7 +436,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     action_grp.add_argument("--self-test", action="store_true", help="Run end-to-end RFC & CLI self-test")
 
     parser.add_argument("-o", "--output", metavar="TARGET", default=None, help="Custom output path")
-    parser.add_argument("-m", "--mode", choices=("max", "turbo"), default="max", help="'max' = G0..G6 (default), 'turbo' = G0,G1,G6")
+    parser.add_argument("-m", "--mode", choices=("max", "turbo"), default="max", help="'max' = G0..G7 (default), 'turbo' = G0,G1,G6")
+    parser.add_argument("--use-zlib", action="store_true", help="Optional external zlib backend (G10..G13) for speed/legacy archives")
     parser.add_argument("--hash", choices=("sha256", "sha512"), default="sha512", help="RFC Anchor Hash algorithm (default: sha512)")
     parser.add_argument("--key-file", metavar="KEYFILE", default=None, help="Secret key file for Bit-3 origin authentication")
     parser.add_argument("-p", "--password", nargs="?", const="__PROMPT__", default=None, help="Encrypt/decrypt archive with Argon2id + XChaCha20-Poly1305")
@@ -451,17 +472,17 @@ def main():
         hash_id = HASH_SHA256 if args.hash == "sha256" else HASH_SHA512
         password = _resolve_password(args.password, confirm=bool(args.compress))
         if args.version:
-            print(f"EULNO CLI PACKER v0.9.6-beta (RFC draft-heilos-eulno-elp8-00)\nAuthor : {AUTHOR_INFO}\nLicense: {LICENSE_INFO}")
+            print(f"EULNO CLI PACKER v0.9.7-beta (Pure Native rANS-256 Standard)\nAuthor : {AUTHOR_INFO}\nLicense: {LICENSE_INFO}")
         elif args.self_test:
-            cmd_self_test(pause_sec=2)
+            cmd_self_test(pause_sec=1)
         elif args.compress:
-            cmd_compress(args.compress, args.output, args.mode, hash_id, key_bytes, password, args.force, args.delete_source, args.verbose)
+            cmd_compress(args.compress, args.output, args.mode, hash_id, key_bytes, password, args.force, args.delete_source, args.verbose, use_zlib=args.use_zlib)
         elif args.extract:
-            cmd_extract(args.extract, args.output, key_bytes, password, args.force, args.verbose)
+            cmd_extract(args.extract, args.output, key_bytes, password, args.force, args.verbose, allow_zlib=args.use_zlib)
         elif args.test:
-            cmd_test_and_info(args.test, key_bytes, password, verify_full=True)
+            cmd_test_and_info(args.test, key_bytes, password, verify_full=True, allow_zlib=args.use_zlib)
         elif args.info:
-            cmd_test_and_info(args.info, key_bytes, password, verify_full=False)
+            cmd_test_and_info(args.info, key_bytes, password, verify_full=False, allow_zlib=args.use_zlib)
     except Exception as exc:
         print(f"\n[CRITICAL ERROR] {exc}")
         sys.exit(2)

@@ -3,10 +3,10 @@
 # AUTHOR:       Robin Heilos (McCalm) <mccalm@outlook.de>
 # PROFILE:      https://huggingface.co | https://eulno.org
 # LICENSE:      EULNO Studio Community License v2.0 (Dedicated to Euler & Noether)
-# MODULE:       ELP8 RFC Master Container, MDL Router G0..G6, O(1) Streaming
-# PROJECT:      EULNO (.elp8) - 3D-Tetrahedron & Wheel-8 Compression Engine
-# VERSION:      v0.9.6-beta (RFC draft-heilos-eulno-elp8-00 Compliant)
-# DATE:         2026-11-25
+# MODULE:       ELP8 RFC Master Container, Native rANS-256, MDL Router G0..G7
+# PROJECT:      EULNO (.elp8) - Deterministic General-Purpose Compression Engine
+# VERSION:      v0.9.7-beta (Audit #24 Compliant - Pure EULNO Standard + Opt Zlib)
+# DATE:         2026-11-27
 # ==============================================================================
 
 import os
@@ -39,7 +39,6 @@ try:
 except ImportError:
     HAS_PYNACL = False
 
-
 try:
     from eulno_tetra3d_v21 import (
         forward_3d_gradient_transform,
@@ -63,28 +62,44 @@ FLAG_INWARD_MIRROR_SPLIT = 0x02
 FLAG_MULTI_CHUNK_GEARS = 0x04
 FLAG_AUTHENTICATED_ORIGIN = 0x08
 FLAG_ENCRYPTED_PAYLOAD = 0x10
+FLAG_ZLIB_OPT = 0x20
 
 DEFAULT_MODULUS = 8
 HASH_SHA256 = 0x01
 HASH_SHA512 = 0x02
-HASH_SPECS = {
-    HASH_SHA256: ("sha256", 32),
-    HASH_SHA512: ("sha512", 64),
-}
+HASH_SPECS = {HASH_SHA256: ("sha256", 32), HASH_SHA512: ("sha512", 64)}
 
 DEFAULT_CHUNK_SIZE = 1048576
 MAX_SAFE_CHUNK_SIZE = 64 * 1024 * 1024
 PROBE_HALF_SIZE = 16384
+BWT_BLOCK_MAX = 32768
+RANS256_M_BITS = 12
+RANS256_M = 1 << RANS256_M_BITS
+RANS256_L = 1 << 16
 
 GANG_NAMES = {
     0: "G0_RAW",
-    1: "G1_TURBO_ZIGZAG",
-    2: "G2_NIBBLE_16x64",
+    1: "G1_TURBO_RANS",
+    2: "G2_NIBBLE_RANS",
     3: "G3_TETRA3D_SPARSE",
-    4: "G4_BITPLANE_PASCAL",
+    4: "G4_BITPLANE_RANS",
     5: "G5_MTF_TETRA3D",
-    6: "G6_WHEEL8_SPIRAL",
+    6: "G6_WHEEL8_RANS",
+    7: "G7_BWT_CONTEXT",
+    10: "G10_TURBO_ZLIB",
+    11: "G11_NIBBLE_ZLIB",
+    12: "G12_BITPLANE_ZLIB",
+    13: "G13_WHEEL8_ZLIB",
 }
+# --- Static O(1) Arena Buffers for 32-KiB BWT / IBWT / MTF (Audit #24 3.1) ---
+_ARENA_SA = np.empty(BWT_BLOCK_MAX, dtype=np.int32)
+_ARENA_RANK = np.empty(BWT_BLOCK_MAX, dtype=np.int32)
+_ARENA_KEY = np.empty(BWT_BLOCK_MAX, dtype=np.int64)
+_ARENA_LF = np.empty(BWT_BLOCK_MAX, dtype=np.int32)
+_ARENA_MTF = np.empty(BWT_BLOCK_MAX, dtype=np.uint8)
+_ARENA_INV = np.empty(BWT_BLOCK_MAX, dtype=np.uint8)
+_ARENA_COUNTS = np.zeros(256, dtype=np.int32)
+_ARENA_STARTS = np.zeros(256, dtype=np.int32)
 
 
 def derive_argon2id_key(password: str, salt16: bytes) -> bytes:
@@ -107,8 +122,7 @@ def sha512_bytes(data: bytes) -> bytes:
 
 
 def compute_s0_sector(anchor_hash: bytes, modulus: int = DEFAULT_MODULUS) -> int:
-    prefix_u64 = struct.unpack(">Q", anchor_hash[:8])[0]
-    return prefix_u64 % modulus
+    return struct.unpack(">Q", anchor_hash[:8])[0] % modulus
 
 
 def _read_exact(fd: int, num_bytes: int) -> bytes:
@@ -121,7 +135,7 @@ def _read_exact(fd: int, num_bytes: int) -> bytes:
     return bytes(buf)
 
 
-def _decompress_bounded(data: bytes, expected_len: int) -> bytes:
+def _decompress_zlib_bounded(data: bytes, expected_len: int) -> bytes:
     if expected_len > MAX_SAFE_CHUNK_SIZE:
         raise MemoryError("Chunk exceeds 64 MiB safety ceiling")
     d = zlib.decompressobj()
@@ -129,27 +143,330 @@ def _decompress_bounded(data: bytes, expected_len: int) -> bytes:
     if d.unconsumed_tail or len(out) != expected_len or d.flush() != b"":
         raise ValueError("Decompression bomb or length mismatch")
     return out
+
+
+def _shannon_h0(arr: np.ndarray) -> float:
+    if len(arr) == 0:
+        return 0.0
+    c = np.bincount(arr, minlength=256)
+    p = c[c > 0] / len(arr)
+    return float(-np.sum(p * np.log2(p)))
+
+
 def is_incompressible_noise(arr: np.ndarray) -> bool:
     if len(arr) < 256:
         return False
     sample = arr[: min(len(arr), 16384)]
-    c0 = np.bincount(sample, minlength=256)
-    p0 = c0[c0 > 0] / len(sample)
-    if float(-np.sum(p0 * np.log2(p0))) < 7.95:
+    if _shannon_h0(sample) < 7.95:
         return False
     diff = (sample[1:].astype(np.int16) - sample[:-1].astype(np.int16)) & 0xFF
-    c1 = np.bincount(diff, minlength=256)
-    p1 = c1[c1 > 0] / len(diff)
-    return float(-np.sum(p1 * np.log2(p1))) >= 7.95
+    return _shannon_h0(diff) >= 7.95
 
 
+# --- Native 256-Symbol rANS & 2-State Context rANS (Audit #24 1.1 & 3.2) ---
+def _normalize_freqs_256(symbols: np.ndarray) -> np.ndarray:
+    counts = np.bincount(symbols, minlength=256).astype(np.int64)
+    total = int(np.sum(counts))
+    freqs = np.zeros(256, dtype=np.uint16)
+    if total == 0:
+        freqs[0] = RANS256_M
+        return freqs
+    present = np.flatnonzero(counts)
+    scaled = np.maximum(1, (counts[present] * RANS256_M) // total)
+    diff = RANS256_M - int(np.sum(scaled))
+    if diff > 0:
+        top = int(np.argmax(scaled))
+        scaled[top] += diff
+    elif diff < 0:
+        order = np.argsort(-scaled)
+        idx = 0
+        while diff < 0:
+            t = int(order[idx % len(order)])
+            if scaled[t] > 1:
+                scaled[t] -= 1
+                diff += 1
+            idx += 1
+    freqs[present] = scaled.astype(np.uint16)
+    return freqs
+
+
+def _pack_freq_table_256(freqs: np.ndarray) -> bytes:
+    mask = np.packbits((freqs > 0).astype(np.uint8), bitorder="little").tobytes()
+    active = freqs[freqs > 0].astype("<u2").tobytes()
+    return mask + active
+
+
+def _unpack_freq_table_256(buf: bytes, offset: int) -> tuple[np.ndarray, int]:
+    if offset + 32 > len(buf):
+        raise ValueError("Truncated rANS-256 frequency mask.")
+    mask_arr = np.frombuffer(buf[offset : offset + 32], dtype=np.uint8)
+    bits = np.unpackbits(mask_arr, bitorder="little")[:256].astype(bool)
+    n_act = int(np.sum(bits))
+    end = offset + 32 + n_act * 2
+    if end > len(buf):
+        raise ValueError("Truncated rANS-256 active frequencies.")
+    freqs = np.zeros(256, dtype=np.uint16)
+    if n_act > 0:
+        freqs[bits] = np.frombuffer(buf[offset + 32 : end], dtype="<u2")
+    if int(np.sum(freqs, dtype=np.int64)) != RANS256_M:
+        raise ValueError("Corrupted rANS-256 frequency sum != 4096.")
+    return freqs, end
+def _build_rans_lut(freqs: np.ndarray) -> tuple[list, list, list]:
+    cum = np.zeros(257, dtype=np.uint32)
+    cum[1:] = np.cumsum(freqs, dtype=np.uint32)
+    slot_to_sym = np.empty(RANS256_M, dtype=np.uint8)
+    for s in range(256):
+        st, en = int(cum[s]), int(cum[s + 1])
+        if en > st:
+            slot_to_sym[st:en] = s
+    return freqs.tolist(), cum.tolist(), slot_to_sym.tolist()
+
+
+def rans256_encode(data: bytes) -> bytes:
+    arr = np.frombuffer(data, dtype=np.uint8)
+    n = len(arr)
+    if n == 0:
+        return struct.pack("<I", 0)
+    freqs = _normalize_freqs_256(arr)
+    cum = np.zeros(257, dtype=np.uint32)
+    cum[1:] = np.cumsum(freqs, dtype=np.uint32)
+    f_list, c_list = freqs.tolist(), cum.tolist()
+    state = RANS256_L
+    out_words = bytearray()
+    for s in arr[::-1].tolist():
+        f, c = f_list[s], c_list[s]
+        x_max = ((RANS256_L >> RANS256_M_BITS) << 16) * f
+        while state >= x_max:
+            out_words.extend(struct.pack("<H", state & 0xFFFF))
+            state >>= 16
+        state = ((state // f) << RANS256_M_BITS) + (state % f) + c
+    return struct.pack("<II", n, state) + _pack_freq_table_256(freqs) + bytes(out_words)
+
+
+def rans256_decode(payload: bytes, expected_len: int) -> bytes:
+    if len(payload) < 4:
+        raise ValueError("Truncated rANS-256 header.")
+    (n,) = struct.unpack("<I", payload[:4])
+    if n != expected_len or n > MAX_SAFE_CHUNK_SIZE:
+        raise ValueError("rANS-256 length mismatch or limit exceeded.")
+    if n == 0:
+        return b""
+    if len(payload) < 8:
+        raise ValueError("Truncated rANS-256 state.")
+    (state,) = struct.unpack("<I", payload[4:8])
+    freqs, pos_hdr = _unpack_freq_table_256(payload, 8)
+    word_stream = payload[pos_hdr:]
+    f_list, c_list, slot_list = _build_rans_lut(freqs)
+    out = bytearray(n)
+    pos = len(word_stream)
+    mask = RANS256_M - 1
+    for i in range(n):
+        slot = state & mask
+        s = slot_list[slot]
+        out[i] = s
+        state = f_list[s] * (state >> RANS256_M_BITS) + slot - c_list[s]
+        while state < RANS256_L and pos > 0:
+            if pos < 2:
+                raise ValueError("rANS-256 unaligned stream underflow.")
+            pos -= 2
+            state = (state << 16) | word_stream[pos] | (word_stream[pos + 1] << 8)
+    if state != RANS256_L or pos != 0:
+        raise ValueError("rANS-256 final state invariant failed (x_end != x_0).")
+    return bytes(out)
+
+
+def rans256_ctx2_encode(arr: np.ndarray) -> bytes:
+    n = len(arr)
+    if n == 0:
+        return struct.pack("<I", 0)
+    prev = np.empty(n, dtype=np.uint8)
+    prev[0] = 0
+    if n > 1:
+        prev[1:] = arr[:-1]
+    c0_mask = prev == 0
+    freqs0 = _normalize_freqs_256(arr[c0_mask])
+    freqs1 = _normalize_freqs_256(arr[~c0_mask])
+    cum0, cum1 = np.zeros(257, dtype=np.uint32), np.zeros(257, dtype=np.uint32)
+    cum0[1:], cum1[1:] = np.cumsum(freqs0, dtype=np.uint32), np.cumsum(freqs1, dtype=np.uint32)
+    f0, c0 = freqs0.tolist(), cum0.tolist()
+    f1, c1 = freqs1.tolist(), cum1.tolist()
+    state = RANS256_L
+    out_words = bytearray()
+    syms_rev = arr[::-1].tolist()
+    prev_rev = prev[::-1].tolist()
+    for s, p in zip(syms_rev, prev_rev):
+        f, c = (f0[s], c0[s]) if p == 0 else (f1[s], c1[s])
+        x_max = ((RANS256_L >> RANS256_M_BITS) << 16) * f
+        while state >= x_max:
+            out_words.extend(struct.pack("<H", state & 0xFFFF))
+            state >>= 16
+        state = ((state // f) << RANS256_M_BITS) + (state % f) + c
+    tbls = _pack_freq_table_256(freqs0) + _pack_freq_table_256(freqs1)
+    return struct.pack("<II", n, state) + tbls + bytes(out_words)
+
+
+def rans256_ctx2_decode(payload: bytes, expected_len: int) -> np.ndarray:
+    if len(payload) < 4:
+        raise ValueError("Truncated ctx2-rANS header.")
+    (n,) = struct.unpack("<I", payload[:4])
+    if n != expected_len or n > MAX_SAFE_CHUNK_SIZE:
+        raise ValueError("ctx2-rANS length mismatch.")
+    if n == 0:
+        return np.empty(0, dtype=np.uint8)
+    if len(payload) < 8:
+        raise ValueError("Truncated ctx2-rANS state.")
+    (state,) = struct.unpack("<I", payload[4:8])
+    freqs0, off1 = _unpack_freq_table_256(payload, 8)
+    freqs1, off2 = _unpack_freq_table_256(payload, off1)
+    word_stream = payload[off2:]
+    f0, c0, sl0 = _build_rans_lut(freqs0)
+    f1, c1, sl1 = _build_rans_lut(freqs1)
+    out = _ARENA_INV[:n] if n <= BWT_BLOCK_MAX else np.empty(n, dtype=np.uint8)
+    out_list = [0] * n
+    pos = len(word_stream)
+    mask = RANS256_M - 1
+    prev = 0
+    for i in range(n):
+        slot = state & mask
+        if prev == 0:
+            s = sl0[slot]
+            state = f0[s] * (state >> RANS256_M_BITS) + slot - c0[s]
+        else:
+            s = sl1[slot]
+            state = f1[s] * (state >> RANS256_M_BITS) + slot - c1[s]
+        out_list[i] = s
+        prev = s
+        while state < RANS256_L and pos > 0:
+            if pos < 2:
+                raise ValueError("ctx2-rANS unaligned stream underflow.")
+            pos -= 2
+            state = (state << 16) | word_stream[pos] | (word_stream[pos + 1] << 8)
+    if state != RANS256_L or pos != 0:
+        raise ValueError("ctx2-rANS final state invariant failed (x_end != x_0).")
+    out[:] = np.array(out_list, dtype=np.uint8)
+    return out
+# --- Gear 7: 32-KiB Prefix-Doubling BWT + MTF + 2-State Context rANS ---
+def _bwt_mtf_block_fwd(block: np.ndarray) -> tuple[int, np.ndarray]:
+    n = len(block)
+    if n <= 1:
+        _ARENA_MTF[:n] = block
+        return 0, _ARENA_MTF[:n]
+    rank = _ARENA_RANK[:n]
+    sa = _ARENA_SA[:n]
+    key = _ARENA_KEY[:n]
+    rank[:] = block
+    sa[:] = np.arange(n, dtype=np.int32)
+    k = 1
+    while k < n:
+        idx_k = (sa + k) % n
+        key[:] = (rank[sa].astype(np.int64) << 16) | rank[idx_k].astype(np.int64)
+        order = np.argsort(key, kind="mergesort")
+        sa[:] = sa[order]
+        s_keys = key[order]
+        diffs = np.empty(n, dtype=np.int32)
+        diffs[0] = 0
+        diffs[1:] = (s_keys[1:] != s_keys[:-1]).astype(np.int32)
+        new_ranks = np.cumsum(diffs, dtype=np.int32)
+        rank[sa] = new_ranks
+        if int(new_ranks[n - 1]) == n - 1:
+            break
+        k <<= 1
+    i0 = int(np.flatnonzero(sa == 0)[0])
+    bwt_bytes = block[(sa - 1) % n].tolist()
+    table = list(range(256))
+    mtf_out = [0] * n
+    for i, sym in enumerate(bwt_bytes):
+        idx = table.index(sym)
+        mtf_out[i] = idx
+        if idx > 0:
+            del table[idx]
+            table.insert(0, sym)
+    _ARENA_MTF[:n] = np.array(mtf_out, dtype=np.uint8)
+    return i0, _ARENA_MTF[:n]
+
+
+def _bwt_mtf_block_inv(mtf_arr: np.ndarray, i0: int) -> bytes:
+    n = len(mtf_arr)
+    if n == 0:
+        if i0 != 0:
+            raise ValueError("Invalid BWT primary index for empty block.")
+        return b""
+    if i0 < 0 or i0 >= n:
+        raise ValueError(f"Corrupted BWT primary index I0={i0} >= N={n}.")
+    if n == 1:
+        return bytes([int(mtf_arr[0])])
+    table = list(range(256))
+    bwt_list = [0] * n
+    for i, idx in enumerate(mtf_arr.tolist()):
+        sym = table[idx]
+        bwt_list[i] = sym
+        if idx > 0:
+            del table[idx]
+            table.insert(0, sym)
+    _ARENA_COUNTS.fill(0)
+    for sym in bwt_list:
+        _ARENA_COUNTS[sym] += 1
+    total = 0
+    for c in range(256):
+        _ARENA_STARTS[c] = total
+        total += int(_ARENA_COUNTS[c])
+    lf = _ARENA_LF[:n]
+    lf_list = [0] * n
+    starts_list = _ARENA_STARTS.tolist()
+    for i, sym in enumerate(bwt_list):
+        lf_list[i] = starts_list[sym]
+        starts_list[sym] += 1
+    lf[:] = np.array(lf_list, dtype=np.int32)
+    out = bytearray(n)
+    ptr = i0
+    for pos in range(n - 1, -1, -1):
+        out[pos] = bwt_list[ptr]
+        ptr = lf_list[ptr]
+    return bytes(out)
+
+
+def encode_gang7_bwt_context(chunk: bytes) -> bytes:
+    arr = np.frombuffer(chunk, dtype=np.uint8)
+    n = len(arr)
+    if n == 0:
+        return struct.pack("<H", 0)
+    num_sub = (n + BWT_BLOCK_MAX - 1) // BWT_BLOCK_MAX
+    out = bytearray(struct.pack("<H", num_sub))
+    for b_idx in range(num_sub):
+        sub = arr[b_idx * BWT_BLOCK_MAX : (b_idx + 1) * BWT_BLOCK_MAX]
+        i0, mtf_arr = _bwt_mtf_block_fwd(sub)
+        enc_sub = rans256_ctx2_encode(mtf_arr)
+        out.extend(struct.pack("<HHI", len(sub), i0, len(enc_sub)))
+        out.extend(enc_sub)
+    return bytes(out)
+
+
+def decode_gang7_bwt_context(payload: bytes, orig_len: int) -> bytes:
+    if len(payload) < 2:
+        raise ValueError("Truncated Gear 7 BWT header.")
+    (num_sub,) = struct.unpack("<H", payload[:2])
+    pos = 2
+    rec = bytearray()
+    for _ in range(num_sub):
+        if pos + 8 > len(payload):
+            raise ValueError("Truncated Gear 7 subblock header.")
+        sub_len, i0, enc_len = struct.unpack("<HHI", payload[pos : pos + 8])
+        pos += 8
+        if sub_len > BWT_BLOCK_MAX or pos + enc_len > len(payload):
+            raise ValueError("Corrupted Gear 7 subblock bounds.")
+        mtf_arr = rans256_ctx2_decode(payload[pos : pos + enc_len], sub_len)
+        pos += enc_len
+        rec.extend(_bwt_mtf_block_inv(mtf_arr, i0))
+    if pos != len(payload) or len(rec) != orig_len:
+        raise ValueError("Gear 7 BWT reconstructed byte length mismatch.")
+    return bytes(rec)
+# --- Gears 1, 2, 3, 4, 5, 6 (Pure EULNO Native rANS + Optional Zlib G10..G13) ---
 def spiral_transform_fast(data: bytes, s0: int, modulus: int = DEFAULT_MODULUS) -> bytes:
     n = len(data)
     if n == 0:
         return b""
     arr = np.frombuffer(data, dtype=np.uint8)
     mid = n // 2
-
     if mid > 0:
         idx_l = np.arange(mid, dtype=np.int64)
         bias_l = (((s0 + idx_l) % modulus) * 31) & 0xFF
@@ -161,7 +478,6 @@ def spiral_transform_fast(data: bytes, s0: int, modulus: int = DEFAULT_MODULUS) 
         out_l = ((val_l.astype(np.int16) - prev_l.astype(np.int16)) & 0xFF).astype(np.uint8)
     else:
         out_l = np.empty(0, dtype=np.uint8)
-
     right_rev = arr[mid:][::-1]
     idx_r = np.arange(len(right_rev), dtype=np.int64)
     bias_r = (((s0 - idx_r) % modulus) * 31) & 0xFF
@@ -180,7 +496,6 @@ def inverse_spiral_transform_fast(transformed: bytes, s0: int, modulus: int = DE
         return b""
     arr = np.frombuffer(transformed, dtype=np.uint8)
     mid = n // 2
-
     if mid > 0:
         idx_l = np.arange(mid, dtype=np.int64)
         bias_l = (((s0 + idx_l) % modulus) * 31) & 0xFF
@@ -188,7 +503,6 @@ def inverse_spiral_transform_fast(transformed: bytes, s0: int, modulus: int = DE
         rec_l = val_l.astype(np.uint8) ^ bias_l.astype(np.uint8)
     else:
         rec_l = np.empty(0, dtype=np.uint8)
-
     right_rev = arr[mid:][::-1]
     idx_r = np.arange(len(right_rev), dtype=np.int64)
     bias_r = (((s0 - idx_r) % modulus) * 31) & 0xFF
@@ -197,14 +511,18 @@ def inverse_spiral_transform_fast(transformed: bytes, s0: int, modulus: int = DE
     return np.concatenate((rec_l, rec_r)).tobytes()
 
 
-def encode_gang6_wheel8(chunk: bytes, chunk_s0: int, z_level: int = 6) -> bytes:
-    return zlib.compress(spiral_transform_fast(chunk, chunk_s0, DEFAULT_MODULUS), level=z_level)
+def encode_gang6_wheel8(chunk: bytes, chunk_s0: int, use_zlib: bool = False) -> bytes:
+    tr = spiral_transform_fast(chunk, chunk_s0, DEFAULT_MODULUS)
+    return zlib.compress(tr, level=6) if use_zlib else rans256_encode(tr)
 
 
-def decode_gang6_wheel8(payload: bytes, c_orig: int, chunk_s0: int, modulus: int = DEFAULT_MODULUS) -> bytes:
-    return inverse_spiral_transform_fast(_decompress_bounded(payload, c_orig), chunk_s0, modulus)
+def decode_gang6_wheel8(payload: bytes, c_orig: int, chunk_s0: int, modulus: int, use_zlib: bool) -> bytes:
+    tr = _decompress_zlib_bounded(payload, c_orig) if use_zlib else rans256_decode(payload, c_orig)
+    return inverse_spiral_transform_fast(tr, chunk_s0, modulus)
+
 
 TURBO_CANDIDATES = ((1, 1), (1, 2), (32, 1), (512, 1), (1024, 1))
+
 
 def _turbo_fwd(arr: np.ndarray, stride: int, order: int) -> np.ndarray:
     n = len(arr)
@@ -233,15 +551,9 @@ def _turbo_inv(res: np.ndarray, stride: int, order: int) -> np.ndarray:
     padded = np.zeros(n + pad_len, dtype=np.int32)
     padded[:n] = res.astype(np.int32)
     grid = padded.reshape(-1, stride)
-    if order == 1:
-        rec_grid = np.cumsum(grid, axis=0) & 0xFF
-    else:
-        d1 = np.cumsum(grid, axis=0) & 0xFF
-        rec_grid = np.cumsum(d1, axis=0) & 0xFF
+    rec_grid = (np.cumsum(grid, axis=0) & 0xFF) if order == 1 else (np.cumsum(np.cumsum(grid, axis=0) & 0xFF, axis=0) & 0xFF)
     return rec_grid.ravel()[:n].astype(np.uint8)
-
-
-def encode_gang1_turbo(chunk: bytes, z_level: int = 1) -> bytes:
+def encode_gang1_turbo(chunk: bytes, use_zlib: bool = False) -> bytes:
     arr = np.frombuffer(chunk, dtype=np.uint8)
     best_cfg, best_small = (1, 1), -1
     sample = arr[: min(len(arr), 16384)]
@@ -250,32 +562,42 @@ def encode_gang1_turbo(chunk: bytes, z_level: int = 1) -> bytes:
         if small > best_small:
             best_small, best_cfg = small, (s, k)
     s_best, k_best = best_cfg
-    return struct.pack("<HB", s_best, k_best) + zlib.compress(_turbo_fwd(arr, s_best, k_best).tobytes(), level=z_level)
+    raw_res = _turbo_fwd(arr, s_best, k_best).tobytes()
+    packed = zlib.compress(raw_res, level=6) if use_zlib else rans256_encode(raw_res)
+    return struct.pack("<HB", s_best, k_best) + packed
 
 
-def decode_gang1_turbo(payload: bytes, c_orig: int) -> bytes:
+def decode_gang1_turbo(payload: bytes, c_orig: int, use_zlib: bool) -> bytes:
     if len(payload) < 3:
         raise ValueError("Gear 1 payload corrupted.")
     stride, order = struct.unpack("<HB", payload[:3])
-    return _turbo_inv(np.frombuffer(_decompress_bounded(payload[3:], c_orig), dtype=np.uint8), stride, order).tobytes()
+    if stride == 0 or order not in (1, 2):
+        raise ValueError("Gear 1 invalid stride/order.")
+    raw_res = _decompress_zlib_bounded(payload[3:], c_orig) if use_zlib else rans256_decode(payload[3:], c_orig)
+    return _turbo_inv(np.frombuffer(raw_res, dtype=np.uint8), stride, order).tobytes()
 
 
-def encode_gang2_nibble_transpose(chunk: bytes) -> bytes:
+def encode_gang2_nibble_transpose(chunk: bytes, use_zlib: bool = False) -> bytes:
     arr = np.frombuffer(chunk, dtype=np.uint8)
     nibbles = np.column_stack(((arr >> 4) & 0x0F, arr & 0x0F)).ravel()
     pad = (64 - (len(nibbles) % 64)) % 64
     if pad > 0:
         nibbles = np.concatenate((nibbles, np.zeros(pad, dtype=np.uint8)))
     pairs = nibbles.reshape(-1, 64).T.ravel().reshape(-1, 2)
-    return struct.pack("<I", len(arr)) + zlib.compress(((pairs[:, 0] << 4) | pairs[:, 1]).tobytes(), level=6)
+    trans_bytes = ((pairs[:, 0] << 4) | pairs[:, 1]).tobytes()
+    packed = zlib.compress(trans_bytes, level=6) if use_zlib else rans256_encode(trans_bytes)
+    return struct.pack("<I", len(arr)) + packed
 
 
-def decode_gang2_nibble_transpose(payload: bytes) -> bytes:
+def decode_gang2_nibble_transpose(payload: bytes, use_zlib: bool) -> bytes:
     if len(payload) < 4:
         raise ValueError("Gear 2 payload corrupted.")
     (orig_n,) = struct.unpack("<I", payload[:4])
     padded_bytes = ((orig_n * 2 + 63) // 64) * 32
-    raw_b = np.frombuffer(_decompress_bounded(payload[4:], padded_bytes), dtype=np.uint8)
+    raw_b = np.frombuffer(
+        _decompress_zlib_bounded(payload[4:], padded_bytes) if use_zlib else rans256_decode(payload[4:], padded_bytes),
+        dtype=np.uint8,
+    )
     trans = np.column_stack(((raw_b >> 4) & 0x0F, raw_b & 0x0F)).ravel()
     pairs = trans.reshape(64, len(trans) // 64).T.ravel()[: orig_n * 2].reshape(-1, 2)
     return ((pairs[:, 0] << 4) | pairs[:, 1]).tobytes()
@@ -283,22 +605,18 @@ def decode_gang2_nibble_transpose(payload: bytes) -> bytes:
 
 def encode_gang3_tetra3d(chunk: bytes) -> bytes:
     if not HAS_TETRA_V21:
-        raise RuntimeError("Missing dependency 'eulno_tetra3d_v21' required to encode G3/G5 chunks.")
+        raise RuntimeError("Missing dependency 'eulno_tetra3d_v21' required for G3/G5.")
     res, _ = forward_3d_gradient_transform(chunk, dim_x=16, dim_y=64)
     return rans20_encode(pack_zero_runs_v21(res))
 
 
 def decode_gang3_tetra3d(payload: bytes, orig_byte_len: int) -> bytes:
     if not HAS_TETRA_V21:
-        raise RuntimeError(
-            "Missing dependency 'eulno_tetra3d_v21' required to decode G3/G5 chunks."
-        )
+        raise RuntimeError("Missing dependency 'eulno_tetra3d_v21' required for G3/G5.")
     return inverse_3d_gradient_transform(
-        unpack_zero_runs_v21(rans20_decode(payload), orig_byte_len * 2),
-        orig_byte_len,
-        dim_x=16,
-        dim_y=64,
+        unpack_zero_runs_v21(rans20_decode(payload), orig_byte_len * 2), orig_byte_len, dim_x=16, dim_y=64
     )
+
 
 def _build_pascal64() -> list:
     c = [[0] * 65 for _ in range(65)]
@@ -308,11 +626,10 @@ def _build_pascal64() -> list:
             c[n][k] = c[n - 1][k - 1] + c[n - 1][k]
     return c
 
+
 PASCAL64 = _build_pascal64()
 BITS_FOR_K64 = tuple(0 if PASCAL64[64][k] <= 1 else (PASCAL64[64][k] - 1).bit_length() for k in range(65))
 FULL_U64 = 0xFFFFFFFFFFFFFFFF
-
-
 def _enc_u64_ctz(w: int) -> tuple[int, int, int]:
     if w == 0:
         return 0, 0, 0
@@ -340,7 +657,7 @@ def _dec_u64_pascal(k: int, index: int) -> int:
     for pos in range(63, -1, -1):
         comb = PASCAL64[pos][rem_k]
         if rem_idx >= comb:
-            val64 |= (1 << pos)
+            val64 |= 1 << pos
             rem_idx -= comb
             rem_k -= 1
             if rem_k == 0:
@@ -348,7 +665,7 @@ def _dec_u64_pascal(k: int, index: int) -> int:
     return val64
 
 
-def encode_gang4_bitplane_pascal(chunk: bytes) -> bytes:
+def encode_gang4_bitplane_pascal(chunk: bytes, use_zlib: bool = False) -> bytes:
     arr = np.frombuffer(chunk, dtype=np.uint8)
     orig_len = len(arr)
     bp_bytes = np.packbits(np.unpackbits(arr).reshape(-1, 8).T.ravel())
@@ -362,7 +679,7 @@ def encode_gang4_bitplane_pascal(chunk: bytes) -> bytes:
         k, idx, n_bits = _enc_u64_ctz(int(w))
         k_list.append(k)
         if n_bits > 0:
-            bit_buf |= (idx << bit_cnt)
+            bit_buf |= idx << bit_cnt
             bit_cnt += n_bits
             while bit_cnt >= 8:
                 packed_idx.append(bit_buf & 0xFF)
@@ -370,15 +687,16 @@ def encode_gang4_bitplane_pascal(chunk: bytes) -> bytes:
                 bit_cnt -= 8
     if bit_cnt > 0:
         packed_idx.append(bit_buf & 0xFF)
-    k_comp = zlib.compress(bytes(k_list), level=6)
+    k_comp = zlib.compress(bytes(k_list), level=6) if use_zlib else rans256_encode(bytes(k_list))
     return struct.pack("<II", orig_len, len(k_comp)) + k_comp + bytes(packed_idx)
 
 
-def decode_gang4_bitplane_pascal(payload: bytes) -> bytes:
+def decode_gang4_bitplane_pascal(payload: bytes, use_zlib: bool) -> bytes:
     if len(payload) < 8:
         raise ValueError("Gear 4 payload too short.")
     orig_len, k_len = struct.unpack("<II", payload[:8])
-    k_list = _decompress_bounded(payload[8 : 8 + k_len], (orig_len + 7) // 8)
+    exp_k = (orig_len + 7) // 8
+    k_list = _decompress_zlib_bounded(payload[8 : 8 + k_len], exp_k) if use_zlib else rans256_decode(payload[8 : 8 + k_len], exp_k)
     idx_stream = payload[8 + k_len :]
     words = np.empty(len(k_list), dtype="<u8")
     byte_pos = bit_buf = bit_cnt = 0
@@ -425,6 +743,7 @@ def decode_gang5_mtf_tetra(payload: bytes, orig_byte_len: int) -> bytes:
             table.insert(0, sym)
     rec_arr = np.array(rec_nib, dtype=np.uint8).reshape(-1, 2)
     return ((rec_arr[:, 0] << 4) | rec_arr[:, 1]).tobytes()
+# --- General-Purpose MDL Router (G0..G7 Pure EULNO + Opt Zlib G10..G13) ---
 def _extract_probe_window(chunk: bytes) -> bytes:
     n = len(chunk)
     if n <= PROBE_HALF_SIZE * 2:
@@ -433,24 +752,35 @@ def _extract_probe_window(chunk: bytes) -> bytes:
     return chunk[:PROBE_HALF_SIZE] + chunk[mid : mid + PROBE_HALF_SIZE]
 
 
-def compress_single_chunk_mdl(chunk: bytes, chunk_s0: int, profile: int = 1) -> tuple[int, bytes]:
+def compress_single_chunk_mdl(chunk: bytes, chunk_s0: int, profile: int = 1, use_zlib: bool = False) -> tuple[int, bytes]:
     arr = np.frombuffer(chunk, dtype=np.uint8)
     best_g, best_p = 0, chunk
     if is_incompressible_noise(arr):
         return best_g, best_p
 
-    z_lvl = 1 if profile == 0 else 6
-    for g_id, cand in ((1, encode_gang1_turbo(chunk, z_lvl)), (6, encode_gang6_wheel8(chunk, chunk_s0, z_lvl))):
+    g1_id = 10 if use_zlib else 1
+    g6_id = 13 if use_zlib else 6
+    for g_id, cand in ((g1_id, encode_gang1_turbo(chunk, use_zlib)), (g6_id, encode_gang6_wheel8(chunk, chunk_s0, use_zlib))):
         if len(cand) < len(best_p):
             best_g, best_p = g_id, cand
 
     if profile == 1:
-        cands = [(2, encode_gang2_nibble_transpose), (4, encode_gang4_bitplane_pascal)]
+        cands = [
+            (11 if use_zlib else 2, lambda d: encode_gang2_nibble_transpose(d, use_zlib)),
+            (12 if use_zlib else 4, lambda d: encode_gang4_bitplane_pascal(d, use_zlib)),
+        ]
         if HAS_TETRA_V21:
             cands.extend(((3, encode_gang3_tetra3d), (5, encode_gang5_mtf_tetra)))
         probe = _extract_probe_window(chunk)
+        p_arr = np.frombuffer(probe, dtype=np.uint8)
+        if _shannon_h0(p_arr) <= 7.95:
+            cands.append((7, encode_gang7_bwt_context))
         if len(probe) < len(chunk):
-            ref_len = min(len(probe), len(encode_gang1_turbo(probe, z_lvl)), len(encode_gang6_wheel8(probe, chunk_s0, z_lvl)))
+            ref_len = min(
+                len(probe),
+                len(encode_gang1_turbo(probe, use_zlib)),
+                len(encode_gang6_wheel8(probe, chunk_s0, use_zlib)),
+            )
             win_g, win_fn = None, None
             for g_id, fn in cands:
                 c_len = len(fn(probe))
@@ -469,22 +799,26 @@ def compress_single_chunk_mdl(chunk: bytes, chunk_s0: int, profile: int = 1) -> 
 
 
 def decode_single_chunk_mdl(
-    g_id: int, payload: bytes, c_orig: int, chunk_s0: int, modulus: int = DEFAULT_MODULUS
+    g_id: int, payload: bytes, c_orig: int, chunk_s0: int, modulus: int = DEFAULT_MODULUS, allow_zlib: bool = True
 ) -> bytes:
+    if g_id in (10, 11, 12, 13) and not allow_zlib:
+        raise ValueError(f"Gear {g_id} requires --use-zlib support enabled.")
     if g_id == 0:
         rec = payload
-    elif g_id == 1:
-        rec = decode_gang1_turbo(payload, c_orig)
-    elif g_id == 2:
-        rec = decode_gang2_nibble_transpose(payload)
+    elif g_id in (1, 10):
+        rec = decode_gang1_turbo(payload, c_orig, use_zlib=(g_id == 10))
+    elif g_id in (2, 11):
+        rec = decode_gang2_nibble_transpose(payload, use_zlib=(g_id == 11))
     elif g_id == 3:
         rec = decode_gang3_tetra3d(payload, c_orig)
-    elif g_id == 4:
-        rec = decode_gang4_bitplane_pascal(payload)
+    elif g_id in (4, 12):
+        rec = decode_gang4_bitplane_pascal(payload, use_zlib=(g_id == 12))
     elif g_id == 5:
         rec = decode_gang5_mtf_tetra(payload, c_orig)
-    elif g_id == 6:
-        rec = decode_gang6_wheel8(payload, c_orig, chunk_s0, modulus)
+    elif g_id in (6, 13):
+        rec = decode_gang6_wheel8(payload, c_orig, chunk_s0, modulus, use_zlib=(g_id == 13))
+    elif g_id == 7:
+        rec = decode_gang7_bwt_context(payload, c_orig)
     else:
         raise ValueError(f"Unknown gear ID: {g_id}")
     if len(rec) != c_orig:
@@ -502,8 +836,6 @@ def _open_regular_file_secure(path: str) -> int:
     except Exception:
         os.close(fd)
         raise
-
-
 def compress_file_stream(
     input_path: str,
     output_path: str,
@@ -513,6 +845,7 @@ def compress_file_stream(
     password: str | None = None,
     overwrite: bool = False,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
+    use_zlib: bool = False,
     progress_cb=None,
 ) -> dict:
     if os.path.abspath(input_path) == os.path.abspath(output_path):
@@ -552,13 +885,18 @@ def compress_file_stream(
         flags = FLAG_COUNTER_ROTATING | FLAG_INWARD_MIRROR_SPLIT | FLAG_MULTI_CHUNK_GEARS
         if use_auth:
             flags |= FLAG_AUTHENTICATED_ORIGIN
+        if use_zlib:
+            flags |= FLAG_ZLIB_OPT
         if use_enc:
             flags |= FLAG_ENCRYPTED_PAYLOAD
             header_field_bytes = os.urandom(digest_len)
             enc_key = derive_argon2id_key(password, header_field_bytes[:16])
             enc_state = crypto_secretstream_xchacha20poly1305_state()
             stream_hdr = crypto_secretstream_xchacha20poly1305_init_push(enc_state, enc_key)
-            aad_hdr = struct.pack(">4sBBBBQ", ELP8_MAGIC, ELP8_RFC_VERSION, flags, DEFAULT_MODULUS, hash_id, orig_size) + header_field_bytes
+            aad_hdr = (
+                struct.pack(">4sBBBBQ", ELP8_MAGIC, ELP8_RFC_VERSION, flags, DEFAULT_MODULUS, hash_id, orig_size)
+                + header_field_bytes
+            )
         else:
             header_field_bytes = anchor_hash
             enc_state = None
@@ -589,14 +927,13 @@ def compress_file_stream(
             else:
                 f_out.write(struct.pack(">I", num_chunks))
                 payload_len += 4
-
             for idx in range(num_chunks):
                 chunk = _read_exact(fd, chunk_size)
                 if not chunk:
                     raise IOError("Unexpected EOF during Pass 2.")
                 read_p2 += len(chunk)
                 hasher_p2.update(chunk)
-                best_g, best_p = compress_single_chunk_mdl(chunk, (s0 + idx) % DEFAULT_MODULUS, profile)
+                best_g, best_p = compress_single_chunk_mdl(chunk, (s0 + idx) % DEFAULT_MODULUS, profile, use_zlib)
                 g_name = GANG_NAMES[best_g]
                 used_modes[g_name] = used_modes.get(g_name, 0) + 1
                 raw_frame = struct.pack(">BII", best_g, len(chunk), len(best_p)) + best_p
@@ -634,7 +971,16 @@ def compress_file_stream(
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-    return {"orig_size": orig_size, "comp_size": header_total + payload_len, "header_size": header_total, "s0": s0, "anchor_hex": anchor_hash.hex(), "modes": used_modes, "encrypted": use_enc}
+    return {
+        "orig_size": orig_size,
+        "comp_size": header_total + payload_len,
+        "header_size": header_total,
+        "s0": s0,
+        "anchor_hex": anchor_hash.hex(),
+        "modes": used_modes,
+        "encrypted": use_enc,
+        "use_zlib": use_zlib,
+    }
 
 
 def decompress_file_stream(
@@ -644,6 +990,8 @@ def decompress_file_stream(
     password: str | None = None,
     overwrite: bool = False,
     verify_only: bool = False,
+    allow_zlib: bool = True,
+    progress_cb=None,
 ) -> dict:
     if not verify_only and output_path is not None:
         if os.path.abspath(container_path) == os.path.abspath(output_path):
@@ -666,7 +1014,8 @@ def decompress_file_stream(
         magic, version, flags, modulus, hash_id, orig_size, payload_len = struct.unpack(ELP8_BASE_FMT, base_hdr)
         if magic != ELP8_MAGIC or version != ELP8_RFC_VERSION or modulus == 0 or hash_id not in HASH_SPECS or not (flags & FLAG_MULTI_CHUNK_GEARS):
             raise ValueError("Invalid RFC ELP8 header.")
-
+        if (flags & FLAG_ZLIB_OPT) and not allow_zlib:
+            raise ValueError("Archive uses optional zlib backend (pass --use-zlib to decode).")
         algo_name, digest_len = HASH_SPECS[hash_id]
         has_auth = bool(flags & FLAG_AUTHENTICATED_ORIGIN)
         is_enc = bool(flags & FLAG_ENCRYPTED_PAYLOAD)
@@ -683,7 +1032,7 @@ def decompress_file_stream(
         bytes_consumed = 0
         if is_enc:
             if not HAS_PYNACL:
-                raise RuntimeError("Encrypted archive requires 'pynacl' (install via: python -m pip install pynacl).")
+                raise RuntimeError("Encrypted archive requires 'pynacl'.")
             if not password:
                 raise ValueError("PASSWORD REQUIRED: Archive is encrypted (use -p / --password).")
             if payload_len < crypto_secretstream_xchacha20poly1305_HEADERBYTES + 4:
@@ -693,35 +1042,19 @@ def decompress_file_stream(
             dec_key = derive_argon2id_key(password, header_field_bytes[:16])
             dec_state = crypto_secretstream_xchacha20poly1305_state()
             crypto_secretstream_xchacha20poly1305_init_pull(dec_state, stream_hdr, dec_key)
-
             len_buf = _read_exact(fd, 4)
-            if len(len_buf) < 4:
-                raise ValueError("Truncated encrypted anchor frame length.")
             bytes_consumed += 4
             (enc_first_len,) = struct.unpack(">I", len_buf)
-            expected_first_enc = digest_len + 4 + crypto_secretstream_xchacha20poly1305_ABYTES
-            if enc_first_len != expected_first_enc:
+            if enc_first_len != digest_len + 4 + crypto_secretstream_xchacha20poly1305_ABYTES:
                 raise ValueError("Invalid encrypted anchor frame length.")
             enc_first = _read_exact(fd, enc_first_len)
-            if len(enc_first) < enc_first_len:
-                raise ValueError("Truncated encrypted anchor frame.")
-            bytes_consumed += enc_first_len
-
+            bytes_consumed += len(enc_first)
             aad_hdr = struct.pack(">4sBBBBQ", magic, version, flags, modulus, hash_id, orig_size) + header_field_bytes
-            try:
-                first_plain, first_tag = crypto_secretstream_xchacha20poly1305_pull(dec_state, enc_first, aad_hdr)
-            except Exception as exc:
-                raise ValueError("DECRYPTION FAILURE: Wrong password, tampered header, or corrupted ciphertext!") from exc
-            if len(first_plain) != digest_len + 4:
-                raise ValueError("Corrupted encrypted anchor frame.")
+            first_plain, first_tag = crypto_secretstream_xchacha20poly1305_pull(dec_state, enc_first, aad_hdr)
             anchor_hash = first_plain[:digest_len]
             (num_chunks,) = struct.unpack(">I", first_plain[digest_len : digest_len + 4])
-            expected_anchor_tag = (
-                crypto_secretstream_xchacha20poly1305_TAG_FINAL
-                if num_chunks == 0
-                else crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
-            )
-            if first_tag != expected_anchor_tag:
+            exp_tag = crypto_secretstream_xchacha20poly1305_TAG_FINAL if num_chunks == 0 else crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
+            if first_tag != exp_tag:
                 raise ValueError("DECRYPTION FAILURE: Unexpected stream tag on anchor frame!")
         else:
             if password:
@@ -733,42 +1066,23 @@ def decompress_file_stream(
 
         s0 = compute_s0_sector(anchor_hash, modulus)
         written_bytes, hasher = 0, hashlib.new(algo_name)
-
         f_out = os.fdopen(tmp_fd, "wb") if tmp_fd != -1 else None
         tmp_fd = -1
         try:
             for idx in range(num_chunks):
                 if is_enc:
-                    len_buf = _read_exact(fd, 4)
-                    if len(len_buf) < 4:
-                        raise ValueError("Truncated encrypted frame length.")
+                    (enc_len,) = struct.unpack(">I", _read_exact(fd, 4))
                     bytes_consumed += 4
-                    (enc_len,) = struct.unpack(">I", len_buf)
                     if enc_len > MAX_SAFE_CHUNK_SIZE + 64:
                         raise MemoryError("Encrypted chunk exceeds 64 MiB safety ceiling.")
                     enc_blob = _read_exact(fd, enc_len)
-                    if len(enc_blob) < enc_len:
-                        raise ValueError("Truncated encrypted chunk payload.")
-                    bytes_consumed += enc_len
-                    try:
-                        raw_frame, frame_tag = crypto_secretstream_xchacha20poly1305_pull(dec_state, enc_blob, None)
-                    except Exception as exc:
-                        raise ValueError("DECRYPTION FAILURE: Ciphertext tampered or truncated!") from exc
-                    expected_tag = (
-                        crypto_secretstream_xchacha20poly1305_TAG_FINAL
-                        if idx == num_chunks - 1
-                        else crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
-                    )
-                    if frame_tag != expected_tag:
-                        raise ValueError("DECRYPTION FAILURE: Stream truncation or invalid frame tag!")
-                    if len(raw_frame) < 9:
-                        raise ValueError("Corrupted decrypted frame header.")
+                    bytes_consumed += len(enc_blob)
+                    raw_frame, frame_tag = crypto_secretstream_xchacha20poly1305_pull(dec_state, enc_blob, None)
+                    exp_t = crypto_secretstream_xchacha20poly1305_TAG_FINAL if idx == num_chunks - 1 else crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
+                    if frame_tag != exp_t or len(raw_frame) < 9:
+                        raise ValueError("DECRYPTION FAILURE: Stream truncation or frame error!")
                     g_id, c_orig, c_comp = struct.unpack(">BII", raw_frame[:9])
-                    if c_orig > MAX_SAFE_CHUNK_SIZE or c_comp > MAX_SAFE_CHUNK_SIZE:
-                        raise MemoryError("Decrypted chunk exceeds 64 MiB safety ceiling.")
                     c_data = raw_frame[9:]
-                    if len(c_data) != c_comp:
-                        raise ValueError("Decrypted chunk payload length mismatch.")
                 else:
                     frame_hdr = _read_exact(fd, 9)
                     if len(frame_hdr) < 9:
@@ -782,11 +1096,13 @@ def decompress_file_stream(
                         raise ValueError("Truncated chunk payload.")
                     bytes_consumed += c_comp
 
-                rec = decode_single_chunk_mdl(g_id, c_data, c_orig, (s0 + idx) % modulus, modulus)
+                rec = decode_single_chunk_mdl(g_id, c_data, c_orig, (s0 + idx) % modulus, modulus, allow_zlib=allow_zlib)
                 if f_out is not None:
                     f_out.write(rec)
                 hasher.update(rec)
                 written_bytes += len(rec)
+                if progress_cb is not None and num_chunks > 1:
+                    progress_cb(idx + 1, num_chunks, GANG_NAMES.get(g_id, f"G{g_id}"))
 
             if bytes_consumed != payload_len or written_bytes != orig_size or not hmac.compare_digest(hasher.digest(), anchor_hash):
                 raise ValueError("INTEGRITY FAILURE: Byte count or Anchor Hash mismatch!")
@@ -808,4 +1124,4 @@ def decompress_file_stream(
             os.remove(tmp_path)
 
     return {"orig_size": orig_size, "container_size": container_size, "num_chunks": num_chunks, "s0": s0, "hash_algo": algo_name.upper(), "anchor_hex": anchor_hash.hex(), "authenticated": has_auth, "encrypted": is_enc}
-
+        
