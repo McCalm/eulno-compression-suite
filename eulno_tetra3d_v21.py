@@ -1,8 +1,7 @@
 # ==============================================================================
 # FILE:         eulno_tetra3d_v21.py
 # AUTHOR:       Robin Heilos (McCalm) <mccalm@outlook.de>
-# PROFILE:      https://huggingface.co
-# LICENSE:      EULNO Studio Community License v2.0 (Dedicated to Euler & Noether)
+# LICENSE:      GNU AGPLv3 (or Commercial Enterprise License — see LICENSE & NOTICE.md)
 # MODULE:       ELP3D v2.1 & v3.0 Engines, Sparse rANS-20, PocketAIMixer, SHA-512
 # PROJECT:      EULNO (.elp3d) - 3D-Tetrahedron & Adaptive Neural Compression Engine
 # VERSION:      v0.9.0-beta (PUBLIC_BETA)

@@ -1,8 +1,7 @@
 # ==============================================================================
 # FILE:         eulno_beta_engine.py
 # AUTHOR:       Robin Heilos (McCalm) <mccalm@outlook.de>
-# PROFILE:      https://huggingface.co | https://eulno.org
-# LICENSE:      EULNO Studio Community License v2.0 (Dedicated to Euler & Noether)
+# LICENSE:      GNU AGPLv3 (or Commercial Enterprise License — see LICENSE & NOTICE.md)
 # MODULE:       ELP8 RFC Master Container, Native rANS-256, MDL Router G0..G7
 # PROJECT:      EULNO (.elp8) - Deterministic General-Purpose Compression Engine
 # VERSION:      v0.9.7-beta (Audit #24 Compliant - Pure EULNO Standard + Opt Zlib)

@@ -1,7 +1,7 @@
 ---
-license: other
-license_name: eulno-community-2.0
+license: agpl-3.0
 license_link: LICENSE
+
 tags:
   - compression
   - data-compression
@@ -116,7 +116,9 @@ python eulno_pack.py -i archive.elp8
 * `eulno_tetra3d_v21.py` — Discrete 3D-tetrahedron gradient predictor and 20-symbol sparse rANS backend (`G3` & `G5`).
 * `docs/rfc/draft-heilos-eulno-elp8-00.xml` — Official IETF Internet-Draft specification (RFCXML v3) for the `.elp8` container format.
 * `docs/manual/` — German Functional Reference & User Guide (`EULNO_Funktionsreferenz_DE.md` & `.pdf` + visual diagrams).
-* `LICENSE` — EULNO Studio Community License v2.0.
+* `LICENSE` — GNU Affero General Public License v3.0 (GNU AGPLv3).
+* `NOTICE.md` — Dual-licensing terms, commercial enterprise option, and user safety notices.
+* `CONTRIBUTING.md` — Contributor License Agreement (CLA) for pull requests.
 * `requirements.txt` — Minimal Python dependency list (`numpy`, `pynacl`).
 * `DEDICATION.md` — Dedication to Leonhard Euler & Emmy Noether.
 
@@ -134,5 +136,6 @@ python eulno_pack.py -i archive.elp8
 
 * **Author:** Robin Heilos (`McCalm`) — [Hugging Face](https://huggingface.co/mccalm/eulno-compression-suite) | [GitHub](https://github.com/mccalm/eulno-compression-suite) | [eulno.org](https://eulno.org)
 * **Technical Support & Bug Reports:** Please use the **Community Tab (Discussions)** on [Hugging Face](https://huggingface.co/mccalm/eulno-compression-suite/discussions) or **Issues** on [GitHub](https://github.com/mccalm/eulno-compression-suite/issues). *No individual email support is provided for community releases.*
-* **License:** **EULNO Studio Community License v2.0** (Dedicated to Euler & Noether) — Free of charge for individuals, academic/research institutions, public authorities, and organizations with annual gross revenue strictly below **USD $10,000,000**.
-* **Commercial Enterprise Licensing (≥ USD $10,000,000):** `mccalm@outlook.de`
+* **Open-Source License:** **GNU Affero General Public License v3.0 (GNU AGPLv3)** — Free to use, study, modify, and distribute under strict copyleft terms, including network/cloud/SaaS source disclosure (Section 13). See `LICENSE` and `NOTICE.md`.
+* **Commercial Enterprise Licensing (Proprietary / Closed-Source Use):** `mccalm@outlook.de`
+

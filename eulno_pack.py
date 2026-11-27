@@ -1,10 +1,7 @@
 # ==============================================================================
 # FILE:         eulno_pack.py
 # AUTHOR:       Robin Heilos (McCalm)
-# PROFILE:      https://huggingface.co | https://eulno.org
-# SUPPORT:      Community Tab at https://huggingface.co (No email support)
-# COMMERCIAL:   mccalm@outlook.de (Enterprise licensing >= $10M annual revenue)
-# LICENSE:      EULNO Studio Community License v2.0 (Dedicated to Euler & Noether)
+# LICENSE:      GNU AGPLv3 (or Commercial Enterprise License — see LICENSE & NOTICE.md)
 # MODULE:       CLI Packer, Directory Tree Archiver, RFC Integrity Tester, Self-Test
 # PROJECT:      EULNO (.elp8) - Deterministic General-Purpose Compression Suite
 # VERSION:      v0.9.7-beta (Audit #24 Compliant - Pure EULNO Standard + Opt Zlib)
@@ -42,7 +39,7 @@ from eulno_beta_engine import (
 
 ARCHIVE_MAGIC = b"ELP8DIR\x01"
 AUTHOR_INFO = "Robin Heilos (McCalm) | https://huggingface.co | https://eulno.org"
-LICENSE_INFO = "EULNO Studio Community License v2.0 (Dedicated to Euler & Noether)"
+LICENSE_INFO = "GNU AGPLv3 (Commercial Enterprise License available — see LICENSE & NOTICE.md)"
 
 
 def _resolve_password(pw_arg: str | None, confirm: bool = False) -> str | None:
