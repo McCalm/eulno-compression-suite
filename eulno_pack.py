@@ -2,23 +2,24 @@
 # FILE:         eulno_pack.py
 # AUTHOR:       Robin Heilos (McCalm)
 # PROFILE:      https://huggingface.co | https://eulno.org
-# SUPPORT:      Community Tab at https://huggingface.co (No email support)
+# SUPPORT:      Community Tab at https://huggingface.co/discussions (No email support)
 # COMMERCIAL:   mccalm@outlook.de (Enterprise licensing >= $10M annual revenue)
 # LICENSE:      EULNO Studio Community License v2.0 (Dedicated to Euler & Noether)
 # MODULE:       CLI Packer, Directory Tree Archiver, RFC Integrity Tester, Self-Test
 # PROJECT:      EULNO (.elp8) - 3D-Tetrahedron & Wheel-8 Compression Suite
-# VERSION:      v0.9.5-beta (RFC draft-heilos-eulno-elp8-00 Compliant)
-# DATE:         2026-11-25
+# VERSION:      v0.9.6-beta (RFC draft-heilos-eulno-elp8-00 Compliant)
+# DATE:         2026-11-27
 # ==============================================================================
 
 import sys
 import os
+import stat
 import time
 import struct
 import argparse
 import tempfile
 import shutil
-import threading
+import getpass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eulno_beta_engine import (
@@ -28,8 +29,9 @@ from eulno_beta_engine import (
     HASH_SHA256,
     HASH_SHA512,
     HASH_SPECS,
+    DEFAULT_CHUNK_SIZE,
     FLAG_AUTHENTICATED_ORIGIN,
-    sha512_bytes,
+    FLAG_ENCRYPTED_PAYLOAD,
     compute_s0_sector,
     _open_regular_file_secure,
     _read_exact,
@@ -39,44 +41,26 @@ from eulno_beta_engine import (
 
 ARCHIVE_MAGIC = b"ELP8DIR\x01"
 AUTHOR_INFO = "Robin Heilos (McCalm) | https://huggingface.co | https://eulno.org"
-SUPPORT_INFO = "Community Tab at https://huggingface.co (No email support)"
+SUPPORT_INFO = "Community Tab at https://huggingface.co/discussions (No email support)"
 COMMERCIAL_INFO = "mccalm@outlook.de (Enterprise licensing >= $10M annual revenue)"
 LICENSE_INFO = "EULNO Studio Community License v2.0 (Dedicated to Euler & Noether)"
 
 
-class ActivityWatchdog:
-    """Terminates the process safely if a single step stalls without progress."""
-    def __init__(self, timeout_sec: float = 45.0):
-        self.timeout_sec = timeout_sec
-        self._last_beat = time.monotonic()
-        self._stage = "Initialization"
-        self._active = False
-        self._stop_evt = threading.Event()
-        self._thread = threading.Thread(target=self._monitor, daemon=True)
-        if timeout_sec > 0:
-            self._thread.start()
-
-    def beat(self, stage: str | None = None):
-        self._last_beat = time.monotonic()
-        if stage:
-            self._stage = stage
-
-    def start(self, stage: str):
-        self.beat(stage)
-        self._active = True
-
-    def stop(self):
-        self._active = False
-
-    def _monitor(self):
-        while not self._stop_evt.wait(0.5):
-            if self._active and (time.monotonic() - self._last_beat) > self.timeout_sec:
-                sys.stderr.write(
-                    f"\n\n[WATCHDOG TIMEOUT] Engine stalled for >{self.timeout_sec:.0f}s "
-                    f"during '{self._stage}'. Aborting safely (exit code 3).\n"
-                )
-                sys.stderr.flush()
-                os._exit(3)
+def _resolve_password(pw_arg: str | None, confirm: bool = False) -> str | None:
+    if pw_arg is None:
+        return None
+    if pw_arg != "__PROMPT__":
+        if not pw_arg:
+            raise ValueError("Password must not be empty.")
+        return pw_arg
+    pw1 = getpass.getpass("Enter archive password: ")
+    if not pw1:
+        raise ValueError("Password must not be empty.")
+    if confirm:
+        pw2 = getpass.getpass("Confirm archive password: ")
+        if pw1 != pw2:
+            raise ValueError("Passwords do not match.")
+    return pw1
 
 
 def print_live_bar(label: str, current: int, total: int, extra: str = ""):
@@ -86,13 +70,16 @@ def print_live_bar(label: str, current: int, total: int, extra: str = ""):
     bar = "#" * filled + "-" * (25 - filled)
     sys.stdout.write(f"\r  [{bar}] {pct:5.1f}% | {label} {extra}   ")
     sys.stdout.flush()
+
+
 def pack_directory_to_temp_stream(folder_path: str, tmp_dir: str) -> tuple[str, int, int]:
     """Bundles an entire directory tree to a temporary file on disk (O(1) RAM)."""
     file_entries = []
     for root, _, files in os.walk(folder_path):
         for fname in sorted(files):
             full_p = os.path.join(root, fname)
-            if os.path.islink(full_p):
+            st = os.lstat(full_p)
+            if not stat.S_ISREG(st.st_mode):
                 continue
             rel_p = os.path.relpath(full_p, folder_path).replace("\\", "/")
             file_entries.append((rel_p, full_p))
@@ -125,10 +112,8 @@ def pack_directory_to_temp_stream(folder_path: str, tmp_dir: str) -> tuple[str, 
     if total_files > 0:
         print()
     return bundle_path, total_files, total_bytes
-
-
 def unpack_file_stream_to_directory(bundle_path: str, target_dir: str, overwrite: bool = False) -> int:
-    """Extracts a bundled directory stream to disk with symlink-escape, path-traversal & overwrite guards."""
+    """Extracts a bundled directory stream to disk with symlink-escape, path-traversal & trailing-byte guards."""
     target_abs = os.path.abspath(target_dir)
     os.makedirs(target_abs, exist_ok=True)
     real_target = os.path.realpath(target_abs)
@@ -151,9 +136,11 @@ def unpack_file_stream_to_directory(bundle_path: str, target_dir: str, overwrite
             if len(raw_name) < name_len:
                 raise IOError("Truncated directory entry path.")
             rel_p = raw_name.decode("utf-8")
+            if not rel_p or rel_p.startswith(("/", "\\")):
+                raise ValueError(f"Security alert: Invalid archive entry path ({rel_p!r})")
             out_path = os.path.abspath(os.path.join(target_abs, rel_p))
 
-            if os.path.commonpath([target_abs, out_path]) != target_abs:
+            if out_path == target_abs or os.path.commonpath([target_abs, out_path]) != target_abs:
                 raise ValueError(f"Security alert: Path traversal blocked ({rel_p})")
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
             if os.path.commonpath([real_target, os.path.realpath(out_path)]) != real_target:
@@ -172,289 +159,253 @@ def unpack_file_stream_to_directory(bundle_path: str, target_dir: str, overwrite
 
             print_live_bar(f"Writing files ({idx}/{num_files})", idx, num_files, f"-> {rel_p[:32]}")
 
+        if in_f.read(1) != b"":
+            raise ValueError("Corrupted directory bundle: trailing bytes detected.")
+
     if num_files > 0:
         print()
     return num_files
 
 
 def cmd_compress(
-    input_path: str,
-    output_path: str | None,
+    source_str: str,
+    output_str: str | None,
     mode: str,
     hash_id: int,
     auth_key: bytes | None,
+    password: str | None,
     force: bool,
     delete_source: bool,
     verbose: bool,
 ):
-    if not os.path.exists(input_path):
-        print(f"[ERROR] Source not found: {input_path}")
-        sys.exit(1)
+    src_abs = os.path.abspath(source_str)
+    if not os.path.exists(src_abs):
+        raise FileNotFoundError(f"Source path not found: {src_abs}")
+    is_dir = os.path.isdir(src_abs)
+    if not is_dir and not os.path.isfile(src_abs):
+        raise ValueError(f"Unsupported path type: {src_abs}")
 
-    is_dir = os.path.isdir(input_path)
-    if output_path is None:
-        clean_in = input_path.rstrip("/\\")
-        output_path = f"{clean_in}.elp8"
+    out_abs = os.path.abspath(output_str) if output_str else (src_abs.rstrip("/\\") + ".elp8")
+    if src_abs == out_abs:
+        raise ValueError("Input and output paths MUST differ.")
+    if os.path.exists(out_abs) and not force:
+        raise FileExistsError(f"Target already exists (use -f / --force): {out_abs}")
 
-    if os.path.abspath(input_path) == os.path.abspath(output_path):
-        print("[ABORT] Security alert: Input and output paths MUST differ.")
-        sys.exit(1)
-    if os.path.exists(output_path) and not force:
-        print(f"[ABORT] Target already exists: {output_path} (use -f / --force to overwrite)")
-        sys.exit(1)
-
-    algo_label = "SHA-256" if hash_id == HASH_SHA256 else "SHA-512"
-    print("=" * 84)
-    print(f"EULNO COMPRESSOR v0.9.5-beta | Mode: {mode.upper()} | Hash: {algo_label} | Target: {os.path.basename(output_path)}")
-    print("=" * 84)
-
-    watchdog = ActivityWatchdog(timeout_sec=45.0)
-    watchdog.start("Initializing stream")
-    tmp_bundle = None
-    t_start = time.perf_counter()
-
-    try:
-        if is_dir:
-            print(f"  [1/3] Bundling directory tree on disk: {input_path}")
-            tmp_bundle, file_count, orig_size = pack_directory_to_temp_stream(input_path, tempfile.gettempdir())
-            stream_source = tmp_bundle
-            print(f"        -> {file_count} files bundled ({orig_size:,} bytes)")
-        else:
-            stream_source = input_path
-            orig_size = os.path.getsize(input_path)
-            print(f"  [1/3] Streaming source file (O(1) RAM): {os.path.basename(input_path)} ({orig_size:,} B)")
-
-        profile_id = 0 if mode == "turbo" else 1
-        gear_desc = "TURBO (G0, G1, G6)" if profile_id == 0 else "MDL AUTO-ROUTER (G0..G6)"
-        print(f"  [2/3] Encoding RFC container ({gear_desc}) + TOCTOU Guard...")
-        watchdog.beat("Streaming encode")
-
-        def _cli_progress(curr: int, total: int, gear_name: str):
-            watchdog.beat(f"Chunk {curr}/{total} ({gear_name})")
-            pct = (curr / total) * 100.0
-            sys.stdout.write(f"\r        -> Chunk {curr}/{total} ({pct:5.1f}%) | Winner: {gear_name:<20}")
-            sys.stdout.flush()
-            if curr == total:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-
-        t_comp0 = time.perf_counter()
-        res = compress_file_stream(
-            stream_source,
-            output_path,
-            profile=profile_id,
-            hash_id=hash_id,
-            auth_key=auth_key,
-            overwrite=force,
-            progress_cb=_cli_progress,
-        )
-        comp_ms = max(0.01, (time.perf_counter() - t_comp0) * 1000.0)
-    finally:
-        watchdog.stop()
-        if tmp_bundle and os.path.exists(tmp_bundle):
-            os.remove(tmp_bundle)
-
-    comp_size = res["comp_size"]
-    ratio_pct = (comp_size * 100.0 / orig_size) if orig_size > 0 else 100.0
-    saved_pct = 100.0 - ratio_pct
-    speed_mbs = (orig_size / 1_048_576.0) / (comp_ms / 1000.0)
-    total_ms = (time.perf_counter() - t_start) * 1000.0
-
-    print(f"  [3/3] Container verified & committed atomically: {output_path}")
-    print("-" * 84)
-    print(f"  RESULT        : {orig_size:,} B  --->  {comp_size:,} B (incl. {res['header_size']} B RFC header)")
-    print(f"  RATIO         : {ratio_pct:.2f} % of original (Space saved: {saved_pct:+.2f} %)")
-    print(f"  WHEEL ANCHOR  : Start Spoke S0 = {res['s0']} (mod 8) | Auth Tag: {'YES (Bit 3)' if auth_key else 'NO'}")
-    print(f"  SELECTED GEARS: {res['modes']}")
-    print(f"  THROUGHPUT    : {speed_mbs:.2f} MB/s (Core: {comp_ms:.1f} ms | Total: {total_ms:.1f} ms)")
-    if verbose:
-        print(f"  FULL ANCHOR   : {res['anchor_hex']}")
-    print("=" * 84)
-
-    if delete_source:
-        if is_dir:
-            print("  [INFO] --delete-source is ignored for directories for safety.")
-        else:
-            os.remove(input_path)
-            print(f"  [INFO] Source file removed (--delete-source): {input_path}")
-
-
-def cmd_extract(archive_path: str, output_path: str | None, auth_key: bytes | None, force: bool, verbose: bool):
-    if not os.path.isfile(archive_path):
-        print(f"[ERROR] Archive not found: {archive_path}")
-        sys.exit(1)
-
-    if output_path is None:
-        output_path = archive_path[:-5] if archive_path.lower().endswith(".elp8") else f"{archive_path}.unpacked"
-
-    if os.path.abspath(archive_path) == os.path.abspath(output_path):
-        print("[ABORT] Security alert: Input and output paths MUST differ.")
-        sys.exit(1)
-    if os.path.exists(output_path) and not force:
-        print(f"[ABORT] Target already exists: {output_path} (use -f / --force to overwrite)")
-        sys.exit(1)
-
-    print("=" * 84)
-    print(f"EULNO EXTRACTOR v0.9.5-beta | Source: {os.path.basename(archive_path)}")
-    print("=" * 84)
+    profile = 0 if mode == "turbo" else 1
     t0 = time.perf_counter()
 
-    watchdog = ActivityWatchdog(timeout_sec=45.0)
-    watchdog.start("Streaming decode & RFC verification")
-    tmp_raw = None
+    def _progress(done: int, total: int, gear: str):
+        pct = (done / total) * 100.0
+        print(f"\r  [COMPRESS] Chunk {done}/{total} ({pct:5.1f}%) -> {gear:<18}", end="", flush=True)
+
+    temp_bundle = None
     try:
-        parent_dir = os.path.dirname(os.path.abspath(output_path)) or "."
-        os.makedirs(parent_dir, exist_ok=True)
-        fd_tmp, tmp_raw = tempfile.mkstemp(prefix=".elp8_ext_", suffix=".raw", dir=parent_dir)
-        os.close(fd_tmp)
-
-        print("  [1/2] Decoding chunks in O(1) RAM & verifying Anchor Hash in constant time...")
-        t_dec0 = time.perf_counter()
-        res = decompress_file_stream(archive_path, tmp_raw, auth_key=auth_key, overwrite=True)
-        dec_ms = max(0.01, (time.perf_counter() - t_dec0) * 1000.0)
-
-        with open(tmp_raw, "rb") as check_f:
-            is_dir_archive = check_f.read(8) == ARCHIVE_MAGIC
-
-        print(f"  [2/2] Promoting verified data to: {output_path}")
-        if is_dir_archive:
-            n_files = unpack_file_stream_to_directory(tmp_raw, output_path, overwrite=force)
-            print(f"        -> Directory with {n_files} files completely restored.")
+        if is_dir:
+            print(f"[EULNO] Bundling directory tree: {src_abs}")
+            out_dir = os.path.dirname(out_abs) or "."
+            os.makedirs(out_dir, exist_ok=True)
+            temp_bundle, file_count, raw_total = pack_directory_to_temp_stream(src_abs, out_dir)
+            print(f"[EULNO] {file_count} files bundled ({raw_total:,} bytes). Compressing...")
+            stats = compress_file_stream(temp_bundle, out_abs, profile, hash_id, auth_key, password, force, progress_cb=_progress)
         else:
-            os.chmod(tmp_raw, 0o644)
-            os.replace(tmp_raw, output_path)
-            tmp_raw = None
+            print(f"[EULNO] Compressing file ({mode.upper()} mode): {src_abs}")
+            stats = compress_file_stream(src_abs, out_abs, profile, hash_id, auth_key, password, force, progress_cb=_progress)
     finally:
-        watchdog.stop()
+        if temp_bundle and os.path.exists(temp_bundle):
+            os.remove(temp_bundle)
+
+    dt = time.perf_counter() - t0
+    if stats["orig_size"] > DEFAULT_CHUNK_SIZE:
+        print()
+    ratio = (stats["comp_size"] / stats["orig_size"] * 100.0) if stats["orig_size"] > 0 else 100.0
+    saved = 100.0 - ratio
+    print(f"[OK] Archive created : {out_abs}")
+    print(f"     Original Size   : {stats['orig_size']:,} bytes")
+    print(f"     ELP8 Size       : {stats['comp_size']:,} bytes ({ratio:.2f}% | Saved: {saved:+.2f}%)")
+    print(f"     Wheel-8 Anchor  : S0 = Sector {stats['s0']} (Encrypted: {stats['encrypted']} | Auth: {auth_key is not None})")
+    if verbose:
+        print(f"     Anchor Hash     : {stats['anchor_hex']}")
+    if stats["modes"]:
+        print(f"     MDL Gears Used  : {stats['modes']}")
+    print(f"     Elapsed Time    : {dt:.3f} s")
+
+    if delete_source:
+        verify = decompress_file_stream(out_abs, None, auth_key=auth_key, password=password, verify_only=True)
+        if verify["anchor_hex"] != stats["anchor_hex"]:
+            raise RuntimeError("Safety abort: Verification failed; source preserved.")
+        if is_dir:
+            shutil.rmtree(src_abs)
+        else:
+            os.remove(src_abs)
+        print(f"[CLEANUP] Verified source securely removed: {src_abs}")
+def cmd_extract(archive_str: str, output_str: str | None, auth_key: bytes | None, password: str | None, force: bool, verbose: bool):
+    arc_abs = os.path.abspath(archive_str)
+    if not os.path.isfile(arc_abs):
+        raise FileNotFoundError(f"Archive not found: {arc_abs}")
+
+    if output_str:
+        target_abs = os.path.abspath(output_str)
+    elif arc_abs.lower().endswith(".elp8"):
+        target_abs = arc_abs[:-5]
+    else:
+        target_abs = arc_abs + ".extracted"
+
+    if arc_abs == target_abs:
+        raise ValueError("Archive and extraction target MUST differ.")
+    if os.path.exists(target_abs) and not force:
+        raise FileExistsError(f"Extraction target already exists (use -f / --force): {target_abs}")
+
+    t0 = time.perf_counter()
+    out_dir = os.path.dirname(target_abs) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    tmp_fd, tmp_raw = tempfile.mkstemp(prefix=".elp8_unpack_", suffix=".raw", dir=out_dir)
+    os.close(tmp_fd)
+
+    try:
+        stats = decompress_file_stream(arc_abs, tmp_raw, auth_key=auth_key, password=password, overwrite=True, verify_only=False)
+        with open(tmp_raw, "rb") as check_f:
+            is_dir_bundle = check_f.read(8) == ARCHIVE_MAGIC
+
+        if is_dir_bundle:
+            if os.path.exists(target_abs) and os.path.isfile(target_abs):
+                if not force:
+                    raise FileExistsError(f"Target exists as file (use -f / --force): {target_abs}")
+                os.remove(target_abs)
+            os.makedirs(target_abs, exist_ok=True)
+            extracted_files = unpack_file_stream_to_directory(tmp_raw, target_abs, overwrite=force)
+            os.remove(tmp_raw)
+            tmp_raw = None
+            dt = time.perf_counter() - t0
+            print(f"[OK] Directory restored : {target_abs} ({extracted_files} files)")
+        else:
+            os.replace(tmp_raw, target_abs)
+            tmp_raw = None
+            dt = time.perf_counter() - t0
+            print(f"[OK] File restored      : {target_abs} ({stats['orig_size']:,} bytes)")
+
+        print(f"     Integrity Check    : {stats['hash_algo']} PASS (100% Bit-Exact | Encrypted: {stats['encrypted']})")
+        if verbose:
+            print(f"     Anchor Hash        : {stats['anchor_hex']}")
+        print(f"     Elapsed Time       : {dt:.3f} s")
+    finally:
         if tmp_raw and os.path.exists(tmp_raw):
             os.remove(tmp_raw)
 
-    orig_size = res["orig_size"]
-    speed_mbs = (orig_size / 1_048_576.0) / (dec_ms / 1000.0)
-    total_ms = (time.perf_counter() - t0) * 1000.0
 
-    print("-" * 84)
-    print(f"  INTEGRITY     : {res['hash_algo']} PASS (100% Bit-Exact | S0={res['s0']} | Auth={res['authenticated']})")
-    print(f"  RESTORED      : {orig_size:,} bytes in {dec_ms:.1f} ms ({speed_mbs:.2f} MB/s | Total: {total_ms:.1f} ms)")
-    if verbose:
-        print(f"  FULL ANCHOR   : {res['anchor_hex']}")
-    print("=" * 84)
+def cmd_test_and_info(archive_str: str, auth_key: bytes | None, password: str | None, verify_full: bool):
+    arc_abs = os.path.abspath(archive_str)
+    if not os.path.isfile(arc_abs):
+        raise FileNotFoundError(f"Archive not found: {arc_abs}")
 
-def cmd_test_and_info(archive_path: str, auth_key: bytes | None, verify_full: bool):
-    if not os.path.isfile(archive_path):
-        print(f"[ERROR] File not found: {archive_path}")
-        sys.exit(1)
-
-    fd = _open_regular_file_secure(archive_path)
-    try:
-        c_size = os.fstat(fd).st_size
-        if c_size < ELP8_BASE_SIZE:
-            raise ValueError("Not a valid ELP8 archive.")
-        base_hdr = _read_exact(fd, ELP8_BASE_SIZE)
-        magic, ver, flags, mod, hash_id, orig_len, payload_len = struct.unpack(ELP8_BASE_FMT, base_hdr)
+    with open(arc_abs, "rb") as f:
+        base = f.read(ELP8_BASE_SIZE)
+        if len(base) < ELP8_BASE_SIZE:
+            raise ValueError("File too small to be an ELP8 container.")
+        magic, ver, flags, mod, hash_id, orig_size, payload_len = struct.unpack(ELP8_BASE_FMT, base)
         if magic != ELP8_MAGIC or hash_id not in HASH_SPECS:
-            raise ValueError("Invalid RFC ELP8 header.")
-        algo_name, digest_len = HASH_SPECS[hash_id]
-        anchor_hex = _read_exact(fd, digest_len).hex()
-        s0 = compute_s0_sector(bytes.fromhex(anchor_hex), mod)
-        has_auth = bool(flags & FLAG_AUTHENTICATED_ORIGIN)
-    finally:
-        os.close(fd)
+            raise ValueError("Not a valid RFC ELP8 container.")
+        algo_name, d_len = HASH_SPECS[hash_id]
+        anchor_field = f.read(d_len)
 
-    ratio = (c_size * 100.0 / orig_len) if orig_len > 0 else 100.0
-    print("=" * 84)
-
-    print("EULNO CONTAINER INSPECTION & RFC INTEGRITY TEST (.elp8 | v0.9.5-beta)")
-    print("=" * 84)
-    print(f"  Author        : {AUTHOR_INFO}")
-    print(f"  Commercial    : {COMMERCIAL_INFO}")
-    print(f"  License       : {LICENSE_INFO}")
-    print("-" * 84)
-    print(f"  File          : {archive_path}")
-    print(f"  RFC Protocol  : Version 0x{ver:02x} | Flags: 0x{flags:02x} | Modulus: M={mod} | Start Spoke S0={s0}")
-    print(f"  Container Size: {c_size:,} bytes | Original Size: {orig_len:,} bytes (Ratio: {ratio:.2f} %)")
-    print(f"  Origin Auth   : {'ACTIVE (64-Byte Tag)' if has_auth else 'NONE'}")
-    print(f"  {algo_name.upper()} Anchor : {anchor_hex}")
+    has_auth = bool(flags & FLAG_AUTHENTICATED_ORIGIN)
+    is_enc = bool(flags & FLAG_ENCRYPTED_PAYLOAD)
+    total_size = os.path.getsize(arc_abs)
+    ratio = (total_size / orig_size * 100.0) if orig_size > 0 else 100.0
+    print(f"[ELP8 RFC HEADER] {arc_abs}")
+    print(f"  Format / Version : ELP8 v0x{ver:02x} (Flags: 0x{flags:02x} | Modulus: {mod})")
+    print(f"  Hash Algorithm   : {algo_name.upper()} ({d_len * 8}-bit)")
+    print(f"  Encrypted (Bit 4): {'YES (Argon2id + XChaCha20-Poly1305)' if is_enc else 'NO'}")
+    print(f"  Origin Auth Tag  : {'ENABLED (64-byte HMAC-SHA512)' if has_auth else 'DISABLED'}")
+    if is_enc:
+        print(f"  Argon2id Salt    : {anchor_field[:16].hex()} (Anchor Hash encrypted inside stream)")
+    else:
+        print(f"  Wheel-8 Sector   : S0 = {compute_s0_sector(anchor_field, mod)}")
+        print(f"  Anchor Hash      : {anchor_field.hex()}")
+    print(f"  Original Size    : {orig_size:,} bytes")
+    print(f"  Container Size   : {total_size:,} bytes (Ratio: {ratio:.2f}%)")
 
     if verify_full:
         t0 = time.perf_counter()
-        decompress_file_stream(archive_path, None, auth_key=auth_key, verify_only=True)
-        ms = (time.perf_counter() - t0) * 1000.0
-        print(f"  INTEGRITY     : PASS (Full O(1)-RAM stream verification in {ms:.1f} ms OK!)")
-    print("=" * 84)
-
-
-def _pause_step(seconds: int = 2):
-    for rem in range(seconds, 0, -1):
-        sys.stdout.write(f"\r  [PAUSE] Next step in {rem}s (press Ctrl+C to abort)... ")
-        sys.stdout.flush()
-        time.sleep(1)
-    sys.stdout.write("\r" + " " * 64 + "\r")
-    sys.stdout.flush()
-
-
+        stats = decompress_file_stream(arc_abs, None, auth_key=auth_key, password=password, verify_only=True)
+        dt = time.perf_counter() - t0
+        print(f"[PASS] Full Stream Verification OK ({stats['num_chunks']} chunks, S0={stats['s0']}, 100% Bit-Exact in {dt:.3f} s)")
 def cmd_self_test(pause_sec: int = 2):
-    print("=" * 84)
-    print("EULNO CLI PACKER v0.9.5-beta — END-TO-END RFC SELF-TEST")
-    print("=" * 84)
-    tmp_dir = tempfile.mkdtemp(prefix="eulno_selftest_")
-    test_key = b"EULNO-RFC-SELFTEST-ORIGIN-KEY-2026"
+    print("=" * 72)
+    print("EULNO (.elp8) v0.9.6-beta - AUTOMATED END-TO-END RFC SELF-TEST")
+    print("=" * 72)
+    with tempfile.TemporaryDirectory(prefix="eulno_selftest_") as tmp:
+        src_file = os.path.join(tmp, "sensor_matrix.bin")
+        arc_max = os.path.join(tmp, "sensor_max.elp8")
+        arc_auth = os.path.join(tmp, "sensor_auth.elp8")
+        rec_file = os.path.join(tmp, "sensor_restored.bin")
+        key_file = os.path.join(tmp, "secret.key")
 
-    try:
-        sample_file = os.path.join(tmp_dir, "sample_payload.py")
-        engine_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eulno_beta_engine.py")
-        if os.path.isfile(engine_path):
-            shutil.copy2(engine_path, sample_file)
-        else:
-            with open(sample_file, "wb") as f:
-                f.write(b'{"sensor":"wheel8","status":"OK","val":42}\n' * 1500)
+        wave = bytes(((i * 3) % 256) for i in range(16384))
+        sparse = b"\x00" * 8192 + b"\x01\x00\x00\x02" * 160
+        raw_sample = wave + sparse + b"EULNO-EULER-NOETHER-2026" * 8
+        with open(src_file, "wb") as f:
+            f.write(raw_sample)
+        with open(key_file, "wb") as kf:
+            kf.write(b"EULNO-SECRET-ORIGIN-KEY-2026")
 
-        arc_max = os.path.join(tmp_dir, "test_max.elp8")
-        arc_auth = os.path.join(tmp_dir, "test_auth.elp8")
-        restored_file = os.path.join(tmp_dir, "restored_payload.py")
+        print("\n[STEP 1/6] Compressing sample dataset (MAX mode G0..G6, SHA-512)...")
+        cmd_compress(src_file, arc_max, "max", HASH_SHA512, None, None, True, False, False)
+        time.sleep(pause_sec)
 
-        print("\n>>> STEP 1/5: Compressing File in MDL_AUTO_MAX Mode (G0..G6, SHA-512)")
-        cmd_compress(sample_file, arc_max, mode="max", hash_id=HASH_SHA512, auth_key=None, force=True, delete_source=False, verbose=True)
-        _pause_step(pause_sec)
+        print("\n[STEP 2/6] Compressing with Origin Authentication Tag (--key-file, SHA-256)...")
+        with open(key_file, "rb") as kf:
+            secret = kf.read()
+        cmd_compress(src_file, arc_auth, "turbo", HASH_SHA256, secret, None, True, False, False)
+        time.sleep(pause_sec)
 
-        print("\n>>> STEP 2/5: Compressing with Authenticated Origin Tag (Bit 3, SHA-256)")
-        cmd_compress(sample_file, arc_auth, mode="turbo", hash_id=HASH_SHA256, auth_key=test_key, force=True, delete_source=False, verbose=False)
-        _pause_step(pause_sec)
+        print("\n[STEP 3/6] Inspecting RFC Container Header (-i / --info)...")
+        cmd_test_and_info(arc_auth, secret, None, verify_full=False)
+        time.sleep(pause_sec)
 
-        print("\n>>> STEP 3/5: Inspecting RFC Header & Start Spoke S0 (-i)")
-        cmd_test_and_info(arc_auth, auth_key=test_key, verify_full=False)
-        _pause_step(pause_sec)
+        print("\n[STEP 4/6] Verifying & Extracting bit-exact (-t and -x)...")
+        cmd_test_and_info(arc_auth, secret, None, verify_full=True)
+        cmd_extract(arc_auth, rec_file, secret, None, True, False)
+        with open(rec_file, "rb") as rf:
+            assert rf.read() == raw_sample, "Self-test bit comparison failed!"
+        time.sleep(pause_sec)
 
-        print("\n>>> STEP 4/5: Full Stream Verification (-t) & Extraction (-x)")
-        cmd_test_and_info(arc_auth, auth_key=test_key, verify_full=True)
-        cmd_extract(arc_auth, restored_file, auth_key=test_key, force=True, verbose=False)
-        _pause_step(pause_sec)
-
-        print("\n>>> STEP 5/5: Directory Tree Bundling & Final Bit-Exact Verification")
-        sub_dir = os.path.join(tmp_dir, "mini_folder")
+        print("\n[STEP 5/6] Testing Directory Tree Bundling & Extraction...")
+        sub_dir = os.path.join(tmp, "project_tree")
         os.makedirs(os.path.join(sub_dir, "nested"), exist_ok=True)
-        shutil.copy2(sample_file, os.path.join(sub_dir, "a.py"))
-        shutil.copy2(sample_file, os.path.join(sub_dir, "nested", "b.py"))
-        dir_arc = os.path.join(tmp_dir, "folder.elp8")
-        dir_out = os.path.join(tmp_dir, "folder_restored")
-        cmd_compress(sub_dir, dir_arc, mode="max", hash_id=HASH_SHA512, auth_key=None, force=True, delete_source=False, verbose=False)
-        cmd_extract(dir_arc, dir_out, auth_key=None, force=True, verbose=False)
+        with open(os.path.join(sub_dir, "a.txt"), "wb") as f1:
+            f1.write(b"Hello Euler & Noether!\n" * 500)
+        with open(os.path.join(sub_dir, "nested", "b.py"), "wb") as f2:
+            f2.write(b"def wheel8(): return 8\n" * 1500)
+        dir_arc = os.path.join(tmp, "tree.elp8")
+        dir_out = os.path.join(tmp, "tree_restored")
+        cmd_compress(sub_dir, dir_arc, "max", HASH_SHA512, None, None, True, False, False)
+        cmd_extract(dir_arc, dir_out, None, None, True, False)
+        with open(os.path.join(dir_out, "nested", "b.py"), "rb") as f2_chk:
+            assert f2_chk.read() == b"def wheel8(): return 8\n" * 1500
+        time.sleep(pause_sec)
 
-        with open(sample_file, "rb") as f1, open(restored_file, "rb") as f2:
-            if sha512_bytes(f1.read()) != sha512_bytes(f2.read()):
-                raise RuntimeError("Self-test SHA-512 mismatch!")
+        print("\n[STEP 6/6] Testing Argon2id + XChaCha20-Poly1305 Encryption (-p)...")
+        arc_enc = os.path.join(tmp, "sensor_vault.elp8")
+        rec_enc = os.path.join(tmp, "sensor_vault_out.bin")
+        cmd_compress(src_file, arc_enc, "max", HASH_SHA512, secret, "EulerNoether2026!", True, False, False)
+        try:
+            cmd_extract(arc_enc, rec_enc, secret, "WrongPassword!", True, False)
+            raise AssertionError("Security failure: Wrong password was not rejected!")
+        except ValueError:
+            print("     Wrong-password rejection : PASS")
+        cmd_extract(arc_enc, rec_enc, secret, "EulerNoether2026!", True, False)
+        with open(rec_enc, "rb") as ef:
+            assert ef.read() == raw_sample, "Encrypted self-test bit comparison failed!"
 
-        print("\n" + "=" * 84)
-        print("  SELF-TEST RESULT: ALL 5 STEPS PASSED (100% RFC & BIT-EXACT VERIFIED!)")
-        print("=" * 84)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    print("\n" + "=" * 72)
+    print("[SUCCESS] ALL 6 SELF-TEST STAGES PASSED 100% BIT-EXACT!")
+    print("=" * 72)
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="eulno_pack.py",
-        description="EULNO (.elp8) v0.9.5-beta - RFC-Compliant Compressor & Extractor (G0..G6 + Wheel-8)",
+        description="EULNO (.elp8) v0.9.6-beta - RFC-Compliant Compressor & Extractor (G0..G6 + Wheel-8)",
     )
     action_grp = parser.add_mutually_exclusive_group(required=True)
     action_grp.add_argument("-c", "--compress", metavar="SOURCE", help="Compress a file or directory into an .elp8 archive")
@@ -468,6 +419,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("-m", "--mode", choices=("max", "turbo"), default="max", help="'max' = G0..G6 (default), 'turbo' = G0,G1,G6")
     parser.add_argument("--hash", choices=("sha256", "sha512"), default="sha512", help="RFC Anchor Hash algorithm (default: sha512)")
     parser.add_argument("--key-file", metavar="KEYFILE", default=None, help="Secret key file for Bit-3 origin authentication")
+    parser.add_argument("-p", "--password", nargs="?", const="__PROMPT__", default=None, help="Encrypt/decrypt archive with Argon2id + XChaCha20-Poly1305")
     parser.add_argument("-f", "--force", action="store_true", help="Overwrite existing output files without aborting")
     parser.add_argument("--delete-source", action="store_true", help="Delete source file after verified compression")
     parser.add_argument("-v", "--verbose", action="store_true", help="Display full anchor hash hex")
@@ -475,32 +427,41 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
 
 def main():
+    for arg in sys.argv[1:]:
+        if arg == "--":
+            break
+        if arg.startswith("-") and not arg.startswith("--") and len(arg) > 2:
+            print(f"[ERROR] Invalid short flag '{arg}'. Did you mean '--{arg[1:]}' (with two dashes)?")
+            sys.exit(2)
+
     parser = build_cli_parser()
     args = parser.parse_args()
 
-    key_bytes = None
-    if args.key_file:
-        with open(args.key_file, "rb") as kf:
-            key_bytes = kf.read()
-        if not key_bytes:
-            print("[ERROR] Key file must not be empty.")
-            sys.exit(1)
-
-    hash_id = HASH_SHA256 if args.hash == "sha256" else HASH_SHA512
-
     try:
+        key_bytes = None
+        if args.key_file:
+            k_fd = _open_regular_file_secure(args.key_file)
+            try:
+                key_bytes = _read_exact(k_fd, 65536)
+            finally:
+                os.close(k_fd)
+            if not key_bytes:
+                raise ValueError("Key file must not be empty.")
+
+        hash_id = HASH_SHA256 if args.hash == "sha256" else HASH_SHA512
+        password = _resolve_password(args.password, confirm=bool(args.compress))
         if args.version:
-            print(f"EULNO CLI PACKER v0.9.5-beta (RFC draft-heilos-eulno-elp8-00)\nAuthor : {AUTHOR_INFO}\nLicense: {LICENSE_INFO}")
+            print(f"EULNO CLI PACKER v0.9.6-beta (RFC draft-heilos-eulno-elp8-00)\nAuthor : {AUTHOR_INFO}\nLicense: {LICENSE_INFO}")
         elif args.self_test:
             cmd_self_test(pause_sec=2)
         elif args.compress:
-            cmd_compress(args.compress, args.output, args.mode, hash_id, key_bytes, args.force, args.delete_source, args.verbose)
+            cmd_compress(args.compress, args.output, args.mode, hash_id, key_bytes, password, args.force, args.delete_source, args.verbose)
         elif args.extract:
-            cmd_extract(args.extract, args.output, key_bytes, args.force, args.verbose)
+            cmd_extract(args.extract, args.output, key_bytes, password, args.force, args.verbose)
         elif args.test:
-            cmd_test_and_info(args.test, key_bytes, verify_full=True)
+            cmd_test_and_info(args.test, key_bytes, password, verify_full=True)
         elif args.info:
-            cmd_test_and_info(args.info, key_bytes, verify_full=False)
+            cmd_test_and_info(args.info, key_bytes, password, verify_full=False)
     except Exception as exc:
         print(f"\n[CRITICAL ERROR] {exc}")
         sys.exit(2)

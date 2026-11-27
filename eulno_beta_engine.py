@@ -5,7 +5,7 @@
 # LICENSE:      EULNO Studio Community License v2.0 (Dedicated to Euler & Noether)
 # MODULE:       ELP8 RFC Master Container, MDL Router G0..G6, O(1) Streaming
 # PROJECT:      EULNO (.elp8) - 3D-Tetrahedron & Wheel-8 Compression Engine
-# VERSION:      v0.9.5-beta (RFC draft-heilos-eulno-elp8-00 Compliant)
+# VERSION:      v0.9.6-beta (RFC draft-heilos-eulno-elp8-00 Compliant)
 # DATE:         2026-11-25
 # ==============================================================================
 
@@ -17,6 +17,28 @@ import hmac
 import tempfile
 import zlib
 import numpy as np
+
+try:
+    from nacl.bindings import (
+        crypto_pwhash_alg,
+        crypto_pwhash_ALG_ARGON2ID13,
+        crypto_pwhash_argon2id_OPSLIMIT_INTERACTIVE,
+        crypto_pwhash_argon2id_MEMLIMIT_INTERACTIVE,
+        crypto_secretstream_xchacha20poly1305_KEYBYTES,
+        crypto_secretstream_xchacha20poly1305_HEADERBYTES,
+        crypto_secretstream_xchacha20poly1305_ABYTES,
+        crypto_secretstream_xchacha20poly1305_TAG_MESSAGE,
+        crypto_secretstream_xchacha20poly1305_TAG_FINAL,
+        crypto_secretstream_xchacha20poly1305_state,
+        crypto_secretstream_xchacha20poly1305_init_push,
+        crypto_secretstream_xchacha20poly1305_push,
+        crypto_secretstream_xchacha20poly1305_init_pull,
+        crypto_secretstream_xchacha20poly1305_pull,
+    )
+    HAS_PYNACL = True
+except ImportError:
+    HAS_PYNACL = False
+
 
 try:
     from eulno_tetra3d_v21 import (
@@ -40,6 +62,7 @@ FLAG_COUNTER_ROTATING = 0x01
 FLAG_INWARD_MIRROR_SPLIT = 0x02
 FLAG_MULTI_CHUNK_GEARS = 0x04
 FLAG_AUTHENTICATED_ORIGIN = 0x08
+FLAG_ENCRYPTED_PAYLOAD = 0x10
 
 DEFAULT_MODULUS = 8
 HASH_SHA256 = 0x01
@@ -62,6 +85,21 @@ GANG_NAMES = {
     5: "G5_MTF_TETRA3D",
     6: "G6_WHEEL8_SPIRAL",
 }
+
+
+def derive_argon2id_key(password: str, salt16: bytes) -> bytes:
+    if not HAS_PYNACL:
+        raise RuntimeError("Encryption requires 'pynacl' (install via: python -m pip install pynacl).")
+    if not password:
+        raise ValueError("Password must not be empty.")
+    return crypto_pwhash_alg(
+        outlen=crypto_secretstream_xchacha20poly1305_KEYBYTES,
+        passwd=password.encode("utf-8"),
+        salt=salt16,
+        opslimit=crypto_pwhash_argon2id_OPSLIMIT_INTERACTIVE,
+        memlimit=crypto_pwhash_argon2id_MEMLIMIT_INTERACTIVE,
+        alg=crypto_pwhash_ALG_ARGON2ID13,
+    )
 
 
 def sha512_bytes(data: bytes) -> bytes:
@@ -244,6 +282,8 @@ def decode_gang2_nibble_transpose(payload: bytes) -> bytes:
 
 
 def encode_gang3_tetra3d(chunk: bytes) -> bytes:
+    if not HAS_TETRA_V21:
+        raise RuntimeError("Missing dependency 'eulno_tetra3d_v21' required to encode G3/G5 chunks.")
     res, _ = forward_3d_gradient_transform(chunk, dim_x=16, dim_y=64)
     return rans20_encode(pack_zero_runs_v21(res))
 
@@ -343,6 +383,8 @@ def decode_gang4_bitplane_pascal(payload: bytes) -> bytes:
     words = np.empty(len(k_list), dtype="<u8")
     byte_pos = bit_buf = bit_cnt = 0
     for i, k in enumerate(k_list):
+        if k > 64:
+            raise ValueError("Corrupted Gear 4 weight k > 64.")
         n_bits = BITS_FOR_K64[k]
         while bit_cnt < n_bits and byte_pos < len(idx_stream):
             bit_buf |= idx_stream[byte_pos] << bit_cnt
@@ -468,6 +510,7 @@ def compress_file_stream(
     profile: int = 1,
     hash_id: int = HASH_SHA512,
     auth_key: bytes | None = None,
+    password: str | None = None,
     overwrite: bool = False,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     progress_cb=None,
@@ -478,6 +521,10 @@ def compress_file_stream(
         raise FileExistsError(f"Target already exists (use -f / --force): {output_path}")
     if hash_id not in HASH_SPECS or not (1 <= chunk_size <= MAX_SAFE_CHUNK_SIZE):
         raise ValueError("Invalid hash_id or chunk_size.")
+
+    use_enc = password is not None
+    if use_enc and not HAS_PYNACL:
+        raise RuntimeError("Encryption requires 'pynacl' (install via: python -m pip install pynacl).")
 
     algo_name, digest_len = HASH_SPECS[hash_id]
     use_auth = auth_key is not None
@@ -505,6 +552,18 @@ def compress_file_stream(
         flags = FLAG_COUNTER_ROTATING | FLAG_INWARD_MIRROR_SPLIT | FLAG_MULTI_CHUNK_GEARS
         if use_auth:
             flags |= FLAG_AUTHENTICATED_ORIGIN
+        if use_enc:
+            flags |= FLAG_ENCRYPTED_PAYLOAD
+            header_field_bytes = os.urandom(digest_len)
+            enc_key = derive_argon2id_key(password, header_field_bytes[:16])
+            enc_state = crypto_secretstream_xchacha20poly1305_state()
+            stream_hdr = crypto_secretstream_xchacha20poly1305_init_push(enc_state, enc_key)
+            aad_hdr = struct.pack(">4sBBBBQ", ELP8_MAGIC, ELP8_RFC_VERSION, flags, DEFAULT_MODULUS, hash_id, orig_size) + header_field_bytes
+        else:
+            header_field_bytes = anchor_hash
+            enc_state = None
+            stream_hdr = b""
+            aad_hdr = None
 
         num_chunks = (orig_size + chunk_size - 1) // chunk_size if orig_size > 0 else 0
         used_modes, hasher_p2, read_p2 = {}, hashlib.new(algo_name), 0
@@ -512,8 +571,25 @@ def compress_file_stream(
 
         with os.fdopen(tmp_fd, "wb") as f_out:
             tmp_fd = -1
-            f_out.write(b"\x00" * header_total + struct.pack(">I", num_chunks))
-            payload_len = 4
+            f_out.write(b"\x00" * header_total)
+            payload_len = 0
+
+            if use_enc:
+                f_out.write(stream_hdr)
+                payload_len += len(stream_hdr)
+                first_plain = anchor_hash + struct.pack(">I", num_chunks)
+                first_tag = (
+                    crypto_secretstream_xchacha20poly1305_TAG_FINAL
+                    if num_chunks == 0
+                    else crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
+                )
+                enc_first = crypto_secretstream_xchacha20poly1305_push(enc_state, first_plain, aad_hdr, first_tag)
+                f_out.write(struct.pack(">I", len(enc_first)) + enc_first)
+                payload_len += 4 + len(enc_first)
+            else:
+                f_out.write(struct.pack(">I", num_chunks))
+                payload_len += 4
+
             for idx in range(num_chunks):
                 chunk = _read_exact(fd, chunk_size)
                 if not chunk:
@@ -523,8 +599,19 @@ def compress_file_stream(
                 best_g, best_p = compress_single_chunk_mdl(chunk, (s0 + idx) % DEFAULT_MODULUS, profile)
                 g_name = GANG_NAMES[best_g]
                 used_modes[g_name] = used_modes.get(g_name, 0) + 1
-                f_out.write(struct.pack(">BII", best_g, len(chunk), len(best_p)) + best_p)
-                payload_len += 9 + len(best_p)
+                raw_frame = struct.pack(">BII", best_g, len(chunk), len(best_p)) + best_p
+                if use_enc:
+                    msg_tag = (
+                        crypto_secretstream_xchacha20poly1305_TAG_FINAL
+                        if idx == num_chunks - 1
+                        else crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
+                    )
+                    enc_frame = crypto_secretstream_xchacha20poly1305_push(enc_state, raw_frame, None, msg_tag)
+                    out_frame = struct.pack(">I", len(enc_frame)) + enc_frame
+                else:
+                    out_frame = raw_frame
+                f_out.write(out_frame)
+                payload_len += len(out_frame)
                 if progress_cb is not None and num_chunks > 1:
                     progress_cb(idx + 1, num_chunks, g_name)
 
@@ -532,9 +619,9 @@ def compress_file_stream(
                 raise IOError("TOCTOU ALERT: Source modified during encoding!")
 
             base_hdr = struct.pack(ELP8_BASE_FMT, ELP8_MAGIC, ELP8_RFC_VERSION, flags, DEFAULT_MODULUS, hash_id, orig_size, payload_len)
-            auth_tag = hmac.new(auth_key, base_hdr + anchor_hash, hashlib.sha512).digest() if use_auth else b""
+            auth_tag = hmac.new(auth_key, base_hdr + header_field_bytes, hashlib.sha512).digest() if use_auth else b""
             f_out.seek(0)
-            f_out.write(base_hdr + anchor_hash + auth_tag)
+            f_out.write(base_hdr + header_field_bytes + auth_tag)
             f_out.flush()
             os.fsync(f_out.fileno())
 
@@ -547,13 +634,14 @@ def compress_file_stream(
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-    return {"orig_size": orig_size, "comp_size": header_total + payload_len, "header_size": header_total, "s0": s0, "anchor_hex": anchor_hash.hex(), "modes": used_modes}
+    return {"orig_size": orig_size, "comp_size": header_total + payload_len, "header_size": header_total, "s0": s0, "anchor_hex": anchor_hash.hex(), "modes": used_modes, "encrypted": use_enc}
 
 
 def decompress_file_stream(
     container_path: str,
     output_path: str | None,
     auth_key: bytes | None = None,
+    password: str | None = None,
     overwrite: bool = False,
     verify_only: bool = False,
 ) -> dict:
@@ -581,35 +669,119 @@ def decompress_file_stream(
 
         algo_name, digest_len = HASH_SPECS[hash_id]
         has_auth = bool(flags & FLAG_AUTHENTICATED_ORIGIN)
+        is_enc = bool(flags & FLAG_ENCRYPTED_PAYLOAD)
         header_total = ELP8_BASE_SIZE + digest_len + (64 if has_auth else 0)
         if container_size != header_total + payload_len or payload_len < 4:
             raise ValueError("Container length mismatch.")
 
-        anchor_hash = _read_exact(fd, digest_len)
+        header_field_bytes = _read_exact(fd, digest_len)
         if has_auth:
             stored_tag = _read_exact(fd, 64)
-            if auth_key is None or not hmac.compare_digest(stored_tag, hmac.new(auth_key, base_hdr + anchor_hash, hashlib.sha512).digest()):
+            if auth_key is None or not hmac.compare_digest(stored_tag, hmac.new(auth_key, base_hdr + header_field_bytes, hashlib.sha512).digest()):
                 raise ValueError("AUTHENTICATION FAILURE: Origin tag missing or invalid!")
 
+        bytes_consumed = 0
+        if is_enc:
+            if not HAS_PYNACL:
+                raise RuntimeError("Encrypted archive requires 'pynacl' (install via: python -m pip install pynacl).")
+            if not password:
+                raise ValueError("PASSWORD REQUIRED: Archive is encrypted (use -p / --password).")
+            if payload_len < crypto_secretstream_xchacha20poly1305_HEADERBYTES + 4:
+                raise ValueError("Truncated encrypted payload.")
+            stream_hdr = _read_exact(fd, crypto_secretstream_xchacha20poly1305_HEADERBYTES)
+            bytes_consumed += len(stream_hdr)
+            dec_key = derive_argon2id_key(password, header_field_bytes[:16])
+            dec_state = crypto_secretstream_xchacha20poly1305_state()
+            crypto_secretstream_xchacha20poly1305_init_pull(dec_state, stream_hdr, dec_key)
+
+            len_buf = _read_exact(fd, 4)
+            if len(len_buf) < 4:
+                raise ValueError("Truncated encrypted anchor frame length.")
+            bytes_consumed += 4
+            (enc_first_len,) = struct.unpack(">I", len_buf)
+            expected_first_enc = digest_len + 4 + crypto_secretstream_xchacha20poly1305_ABYTES
+            if enc_first_len != expected_first_enc:
+                raise ValueError("Invalid encrypted anchor frame length.")
+            enc_first = _read_exact(fd, enc_first_len)
+            if len(enc_first) < enc_first_len:
+                raise ValueError("Truncated encrypted anchor frame.")
+            bytes_consumed += enc_first_len
+
+            aad_hdr = struct.pack(">4sBBBBQ", magic, version, flags, modulus, hash_id, orig_size) + header_field_bytes
+            try:
+                first_plain, first_tag = crypto_secretstream_xchacha20poly1305_pull(dec_state, enc_first, aad_hdr)
+            except Exception as exc:
+                raise ValueError("DECRYPTION FAILURE: Wrong password, tampered header, or corrupted ciphertext!") from exc
+            if len(first_plain) != digest_len + 4:
+                raise ValueError("Corrupted encrypted anchor frame.")
+            anchor_hash = first_plain[:digest_len]
+            (num_chunks,) = struct.unpack(">I", first_plain[digest_len : digest_len + 4])
+            expected_anchor_tag = (
+                crypto_secretstream_xchacha20poly1305_TAG_FINAL
+                if num_chunks == 0
+                else crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
+            )
+            if first_tag != expected_anchor_tag:
+                raise ValueError("DECRYPTION FAILURE: Unexpected stream tag on anchor frame!")
+        else:
+            if password:
+                raise ValueError("Archive is NOT encrypted, but a password was provided.")
+            dec_state = None
+            anchor_hash = header_field_bytes
+            (num_chunks,) = struct.unpack(">I", _read_exact(fd, 4))
+            bytes_consumed += 4
+
         s0 = compute_s0_sector(anchor_hash, modulus)
-        (num_chunks,) = struct.unpack(">I", _read_exact(fd, 4))
-        bytes_consumed, written_bytes, hasher = 4, 0, hashlib.new(algo_name)
+        written_bytes, hasher = 0, hashlib.new(algo_name)
 
         f_out = os.fdopen(tmp_fd, "wb") if tmp_fd != -1 else None
         tmp_fd = -1
         try:
             for idx in range(num_chunks):
-                frame_hdr = _read_exact(fd, 9)
-                if len(frame_hdr) < 9:
-                    raise ValueError("Truncated chunk header.")
-                bytes_consumed += 9
-                g_id, c_orig, c_comp = struct.unpack(">BII", frame_hdr)
-                if c_orig > MAX_SAFE_CHUNK_SIZE or c_comp > MAX_SAFE_CHUNK_SIZE:
-                    raise MemoryError("Chunk exceeds 64 MiB safety ceiling.")
-                c_data = _read_exact(fd, c_comp)
-                if len(c_data) < c_comp:
-                    raise ValueError("Truncated chunk payload.")
-                bytes_consumed += c_comp
+                if is_enc:
+                    len_buf = _read_exact(fd, 4)
+                    if len(len_buf) < 4:
+                        raise ValueError("Truncated encrypted frame length.")
+                    bytes_consumed += 4
+                    (enc_len,) = struct.unpack(">I", len_buf)
+                    if enc_len > MAX_SAFE_CHUNK_SIZE + 64:
+                        raise MemoryError("Encrypted chunk exceeds 64 MiB safety ceiling.")
+                    enc_blob = _read_exact(fd, enc_len)
+                    if len(enc_blob) < enc_len:
+                        raise ValueError("Truncated encrypted chunk payload.")
+                    bytes_consumed += enc_len
+                    try:
+                        raw_frame, frame_tag = crypto_secretstream_xchacha20poly1305_pull(dec_state, enc_blob, None)
+                    except Exception as exc:
+                        raise ValueError("DECRYPTION FAILURE: Ciphertext tampered or truncated!") from exc
+                    expected_tag = (
+                        crypto_secretstream_xchacha20poly1305_TAG_FINAL
+                        if idx == num_chunks - 1
+                        else crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
+                    )
+                    if frame_tag != expected_tag:
+                        raise ValueError("DECRYPTION FAILURE: Stream truncation or invalid frame tag!")
+                    if len(raw_frame) < 9:
+                        raise ValueError("Corrupted decrypted frame header.")
+                    g_id, c_orig, c_comp = struct.unpack(">BII", raw_frame[:9])
+                    if c_orig > MAX_SAFE_CHUNK_SIZE or c_comp > MAX_SAFE_CHUNK_SIZE:
+                        raise MemoryError("Decrypted chunk exceeds 64 MiB safety ceiling.")
+                    c_data = raw_frame[9:]
+                    if len(c_data) != c_comp:
+                        raise ValueError("Decrypted chunk payload length mismatch.")
+                else:
+                    frame_hdr = _read_exact(fd, 9)
+                    if len(frame_hdr) < 9:
+                        raise ValueError("Truncated chunk header.")
+                    bytes_consumed += 9
+                    g_id, c_orig, c_comp = struct.unpack(">BII", frame_hdr)
+                    if c_orig > MAX_SAFE_CHUNK_SIZE or c_comp > MAX_SAFE_CHUNK_SIZE:
+                        raise MemoryError("Chunk exceeds 64 MiB safety ceiling.")
+                    c_data = _read_exact(fd, c_comp)
+                    if len(c_data) < c_comp:
+                        raise ValueError("Truncated chunk payload.")
+                    bytes_consumed += c_comp
+
                 rec = decode_single_chunk_mdl(g_id, c_data, c_orig, (s0 + idx) % modulus, modulus)
                 if f_out is not None:
                     f_out.write(rec)
@@ -635,4 +807,5 @@ def decompress_file_stream(
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-    return {"orig_size": orig_size, "container_size": container_size, "num_chunks": num_chunks, "s0": s0, "hash_algo": algo_name.upper(), "anchor_hex": anchor_hash.hex(), "authenticated": has_auth}
+    return {"orig_size": orig_size, "container_size": container_size, "num_chunks": num_chunks, "s0": s0, "hash_algo": algo_name.upper(), "anchor_hex": anchor_hash.hex(), "authenticated": has_auth, "encrypted": is_enc}
+

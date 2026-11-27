@@ -14,11 +14,11 @@ tags:
   - pure-python
 ---
 
-# EULNO (`.elp8`) — 3D-Tetrahedron, Wheel-8 & Combinatorial Compression Suite (`v0.9.5-beta`)
+# EULNO (`.elp8`) — 3D-Tetrahedron, Wheel-8 & Combinatorial Compression Suite (`v0.9.6-beta`)
 
-**Quick Links:** [🌐 Project Website (eulno.org)](https://eulno.org) · [📖 User Guide & Functional Reference (DE)](docs/manual/EULNO_Funktionsreferenz_DE.md) · [📄 IETF RFC Draft (`draft-heilos-eulno-elp8-00`)](docs/rfc/draft-heilos-eulno-elp8-00.xml) · [🏛️ Zenodo DOI (`10.5281/zenodo.24521151`)](https://doi.org)
+**Quick Links:** [🌐 Project Website (eulno.org)](https://eulno.org) · [📖 User Guide & Functional Reference (DE)](docs/manual/EULNO_Funktionsreferenz_DE.md) · [📄 IETF RFC Draft (`draft-heilos-eulno-elp8-00`)](docs/rfc/draft-heilos-eulno-elp8-00.xml) · [🏛️ Zenodo DOI (`10.5281/zenodo.24521151`)](https://doi.org/10.5281/zenodo.24521151)
 
-> **Public Beta Notice (`v0.9.5-beta`):** This release implements the RFC-compliant `.elp8` streaming container specification (`draft-heilos-eulno-elp8-00`), full-lifecycle TOCTOU/symlink/quarantine hardening, and 7-gear MDL routing (`G0..G6`). Always maintain independent, verified backups of important files before testing new archive formats.
+**Public Beta Notice (`v0.9.6-beta`):** This release implements the RFC-compliant `.elp8` streaming container specification (`draft-heilos-eulno-elp8-00`), full-lifecycle TOCTOU/symlink/quarantine hardening, and 7-gear MDL routing (`G0..G6`). Always maintain independent, verified backups of important files before testing new archive formats.
 
 **EULNO** is a pure-Python, integer-based lossless compression engine and `O(1)`-RAM streaming CLI archiving suite built around **discrete 3D-tetrahedron geometry**, **counter-rotating modulo-8 wheel geometry with hash-anchored phase alignment (`S₀`)**, **unified multi-stride difference operators (`Δₛ,ₖ`)**, **bit-plane slicing with CTZ-accelerated Pascal `C(64, k)` combinatorial coding**, and **Move-To-Front (MTF)** transforms.
 
@@ -26,9 +26,10 @@ Every `.elp8` container enforces **bit-exact data integrity** via an RFC-complia
 
 ---
 
-## Key Features (`v0.9.5-beta`)
+## Key Features (`v0.9.6-beta`)
 
 * **RFC-Compliant Streaming Container (`draft-heilos-eulno-elp8-00`):**
+  * **Authenticated Vault Encryption (`-p / --password`, Flag Bit 4):** Optional post-quantum-safe payload encryption using **Argon2id** key derivation and **`O(1)`-RAM `XChaCha20-Poly1305` secretstream** (`Compress-then-Encrypt`) with AEAD header binding.
   * Supports arbitrarily large files (multi-GB / TB up to `2^64 - 1` bytes) with **constant `O(1)` RAM usage**.
   * Configurable **Anchor Hash** (`--hash sha512` default or `--hash sha256`) and optional **64-byte Origin Authentication Tag** (`--key-file`, Flag Bit 3).
   * Full-lifecycle security hardening: `O_NOFOLLOW` descriptor locking, two-pass TOCTOU modification guard, bounded decompression (`64 MiB` chunk ceiling), path-traversal & symlink-escape protection, overwrite protection (requires `-f`), and atomic quarantine promotion (`os.replace`).
@@ -43,7 +44,7 @@ Every `.elp8` container enforces **bit-exact data integrity** via an RFC-complia
   * **Gear 4 (`G4_BITPLANE_PASCAL`):** 8-layer bit-plane slicing + bitwise XOR edge detection + CTZ-accelerated (`w & -w`) Pascal `C(64, k)` enumerative coding.
   * **Gear 5 (`G5_MTF_TETRA3D`):** Move-To-Front recency ranking coupled with 3D-tetrahedron gradient coding.
   * **Gear 6 (`G6_WHEEL8_SPIRAL`):** Counter-rotating modulo-8 wheel phase transform with **Inward-Mirror-Split** (left half clockwise `0 -> mid-1`, right half counter-clockwise inward `n-1 -> mid`) anchored at sector `S₀`.
-* **Built-in End-to-End Self-Test (`--self-test`):** 5-step verification suite covering `G0..G6`, SHA-512 & SHA-256, Bit-3 origin authentication, and directory tree bundling.
+* **Built-in End-to-End Self-Test (`--self-test`):** 6-step verification suite covering `G0..G6`, SHA-512 & SHA-256, Bit-3 origin authentication, directory tree bundling and Argon2id + XChaCha20-Poly1305 encryption.
 
 ---
 
@@ -57,6 +58,9 @@ python eulno_pack.py --self-test
 ### CLI Usage Examples
 
 ```bash
+# Compress and encrypt an archive with Argon2id + XChaCha20-Poly1305
+python eulno_pack.py -c secret_data.bin -p
+
 # Compress a single file with maximum compression (MDL Auto-Router G0..G6, SHA-512)
 python eulno_pack.py -c heartbeat.wav
 
@@ -79,7 +83,7 @@ python eulno_pack.py -i archive.elp8
 
 ---
 
-## Benchmark & Real-World Streaming Evaluation (`v0.9.5-beta`)
+## Benchmark & Real-World Streaming Evaluation (`v0.9.6-beta`)
 
 * **Real-World Uncompressed PCM Audio (`heartbeat.wav` — 67,752,136 B):**
   * **Compression (`-m max --hash sha512`):** `67,752,136 B` → `60,829,784 B` (**+10.22 % lossless space saved**, `88 B` RFC header, `S0 = 3`, Gears: `51x G2_NIBBLE_16x64`, `14x G1_TURBO_ZIGZAG`).
@@ -104,14 +108,14 @@ python eulno_pack.py -i archive.elp8
 * `docs/rfc/draft-heilos-eulno-elp8-00.xml` — Official IETF Internet-Draft specification (RFCXML v3) for the `.elp8` container format.
 * `docs/manual/` — German Functional Reference & User Guide (`EULNO_Funktionsreferenz_DE.md` & `.pdf` + visual diagrams).
 * `LICENSE` — EULNO Studio Community License v2.0.
-* `requirements.txt` — Minimal Python dependency list (`numpy`).
+* `requirements.txt` — Minimal Python dependency list (`numpy`, `pynacl`).
 * `DEDICATION.md` — Dedication to Leonhard Euler & Emmy Noether.
 
 ---
 
 ## Citation & Official Identifiers
 
-* **Zenodo Archive DOI:** [`10.5281/zenodo.24521151`](https://doi.org)
+* **Zenodo Archive DOI:** [`10.5281/zenodo.24521151`](https://doi.org/10.5281/zenodo.24521151)
 * **IETF Specification Draft:** `draft-heilos-eulno-elp8-00` (*The ELP8 Container Format for Geometric Wheel-8 Compression, Hash-Anchored Self-Alignment, and Multi-Gear Streaming*)
 * **Project Website:** [https://eulno.org](https://eulno.org)
 
@@ -119,7 +123,7 @@ python eulno_pack.py -i archive.elp8
 
 ## Author, Support & Licensing
 
-* **Author:** Robin Heilos (`McCalm`) — [Hugging Face](https://huggingface.co) | [GitHub](https://github.com) | [eulno.org](https://eulno.org)
-* **Technical Support & Bug Reports:** Please use the **Community Tab (Discussions)** on [Hugging Face](https://huggingface.co/discussions) or **Issues** on [GitHub](https://github.com/issues). *No individual email support is provided for community releases.*
+* **Author:** Robin Heilos (`McCalm`) — [Hugging Face](https://huggingface.co/mccalm/eulno-compression-suite) | [GitHub](https://github.com/mccalm/eulno-compression-suite) | [eulno.org](https://eulno.org)
+* **Technical Support & Bug Reports:** Please use the **Community Tab (Discussions)** on [Hugging Face](https://huggingface.co/mccalm/eulno-compression-suite/discussions) or **Issues** on [GitHub](https://github.com/mccalm/eulno-compression-suite/issues). *No individual email support is provided for community releases.*
 * **License:** **EULNO Studio Community License v2.0** (Dedicated to Euler & Noether) — Free of charge for individuals, academic/research institutions, public authorities, and organizations with annual gross revenue strictly below **USD $10,000,000**.
 * **Commercial Enterprise Licensing (≥ USD $10,000,000):** `mccalm@outlook.de`
