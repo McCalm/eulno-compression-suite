@@ -16,9 +16,7 @@ tags:
 
 # EULNO (`.elp8`) — 3D-Tetrahedron, Wheel-8 & Combinatorial Compression Suite (`v0.9.5-beta`)
 
-[![DOI](https://zenodo.org)](https://doi.org)
-[![RFC Spec](https://shields.io)](docs/rfc/draft-heilos-eulno-elp8-00.xml)
-[![Project Web](https://shields.io)](https://eulno.org)
+**Quick Links:** [🌐 Project Website (eulno.org)](https://eulno.org) · [📖 User Guide & Functional Reference (DE)](docs/manual/EULNO_Funktionsreferenz_DE.md) · [📄 IETF RFC Draft (`draft-heilos-eulno-elp8-00`)](docs/rfc/draft-heilos-eulno-elp8-00.xml) · [🏛️ Zenodo DOI (`10.5281/zenodo.24521151`)](https://doi.org)
 
 > **Public Beta Notice (`v0.9.5-beta`):** This release implements the RFC-compliant `.elp8` streaming container specification (`draft-heilos-eulno-elp8-00`), full-lifecycle TOCTOU/symlink/quarantine hardening, and 7-gear MDL routing (`G0..G6`). Always maintain independent, verified backups of important files before testing new archive formats.
 
@@ -104,6 +102,7 @@ python eulno_pack.py -i archive.elp8
 * `eulno_pack.py` — Hardened CLI packer/extractor, `O(1)`-RAM directory bundler, and `--self-test` runner.
 * `eulno_tetra3d_v21.py` — Discrete 3D-tetrahedron gradient predictor and 20-symbol sparse rANS backend (`G3` & `G5`).
 * `docs/rfc/draft-heilos-eulno-elp8-00.xml` — Official IETF Internet-Draft specification (RFCXML v3) for the `.elp8` container format.
+* `docs/manual/` — German Functional Reference & User Guide (`EULNO_Funktionsreferenz_DE.md` & `.pdf` + visual diagrams).
 * `LICENSE` — EULNO Studio Community License v2.0.
 * `requirements.txt` — Minimal Python dependency list (`numpy`).
 * `DEDICATION.md` — Dedication to Leonhard Euler & Emmy Noether.
@@ -120,7 +119,7 @@ python eulno_pack.py -i archive.elp8
 
 ## Author, Support & Licensing
 
-* **Author:** Robin Heilos (`McCalm`) — [https://huggingface.co](https://huggingface.co) | [https://eulno.org](https://eulno.org)
-* **Technical Support & Bug Reports:** Please use the **Community Tab (Discussions)** on Hugging Face ([https://huggingface.co](https://huggingface.co)). *No individual email support is provided for community releases.*
+* **Author:** Robin Heilos (`McCalm`) — [Hugging Face](https://huggingface.co) | [GitHub](https://github.com) | [eulno.org](https://eulno.org)
+* **Technical Support & Bug Reports:** Please use the **Community Tab (Discussions)** on [Hugging Face](https://huggingface.co/discussions) or **Issues** on [GitHub](https://github.com/issues). *No individual email support is provided for community releases.*
 * **License:** **EULNO Studio Community License v2.0** (Dedicated to Euler & Noether) — Free of charge for individuals, academic/research institutions, public authorities, and organizations with annual gross revenue strictly below **USD $10,000,000**.
 * **Commercial Enterprise Licensing (≥ USD $10,000,000):** `mccalm@outlook.de`
